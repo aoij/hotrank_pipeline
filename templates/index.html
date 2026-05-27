@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hotrank Pipeline</title>
+  <style>
+    body { font-family: "Segoe UI", "PingFang SC", sans-serif; background:#f6f8fb; color:#1f2937; margin:0; }
+    .container { max-width:1200px; margin:0 auto; padding:24px; }
+    .hero { background:linear-gradient(135deg,#2563eb,#7c3aed); color:#fff; border-radius:18px; padding:24px 28px; box-shadow:0 12px 30px rgba(37,99,235,.15);}
+    .grid { display:grid; grid-template-columns:1.2fr 1fr; gap:20px; margin-top:20px; }
+    .card { background:#fff; border-radius:16px; padding:20px; box-shadow:0 10px 24px rgba(15,23,42,.06);}
+    .stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-top:18px; }
+    .stat { background:#eff6ff; border-radius:12px; padding:14px; }
+    .stat h3 { margin:0; font-size:13px; color:#475569; }
+    .stat p { margin:8px 0 0; font-size:22px; font-weight:700; }
+    input, textarea { width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid #d1d5db; border-radius:10px; font-size:14px; }
+    label { display:block; font-size:13px; font-weight:600; margin:10px 0 6px; color:#334155; }
+    button { border:none; border-radius:10px; padding:10px 16px; background:#2563eb; color:#fff; cursor:pointer; font-weight:600; }
+    button.secondary { background:#0f766e; }
+    button.warn { background:#7c3aed; }
+    form.inline { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .cluster { border-top:1px solid #e5e7eb; padding-top:12px; margin-top:12px; }
+    .message { margin-top:16px; background:#dcfce7; color:#166534; padding:12px 14px; border-radius:10px; }
+    code { background:#eef2ff; padding:2px 6px; border-radius:6px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="hero">
+      <h1>Hotrank Pipeline</h1>
+      <p>TopHub 热点抓取 → PostgreSQL → 聚类 → 正文补抓 → 微信公众号初稿生成</p>
+      {% if message %}
+      <div class="message">{{ message }}</div>
+      {% endif %}
+      <div class="stats">
+        <div class="stat"><h3>抓取次数</h3><p>{{ stats.runs }}</p></div>
+        <div class="stat"><h3>榜单快照</h3><p>{{ stats.snapshots }}</p></div>
+        <div class="stat"><h3>聚类数</h3><p>{{ stats.clusters }}</p></div>
+        <div class="stat"><h3>初稿数</h3><p>{{ stats.drafts }}</p></div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>模型与输出配置</h2>
+        <form method="post" action="/config">
+          <label>LLM Base URL</label>
+          <input name="llm_base_url" value="{{ runtime.llm.base_url }}">
+          <label>LLM 模型</label>
+          <input name="llm_model" value="{{ runtime.llm.model }}">
+          <label>LLM API Key（留空则保持当前值）</label>
+          <input name="llm_api_key" placeholder="当前：{{ masked_api_key }}">
+          <label>稿件归档目录</label>
+          <input name="draft_output_dir" value="{{ runtime.draft_output_dir }}">
+          <label>榜单白名单（逗号分隔）</label>
+          <textarea name="board_whitelist" rows="3">{{ runtime.board_whitelist | join(', ') }}</textarea>
+          <label>每篇稿件最多插图数</label>
+          <input type="number" min="1" max="12" name="image_max_per_draft" value="{{ runtime.images.max_per_draft if runtime.images else 6 }}">
+          <label>单个来源最多取图数</label>
+          <input type="number" min="1" max="8" name="image_max_per_source" value="{{ runtime.images.max_per_source if runtime.images else 4 }}">
+          <div style="margin-top:14px;">
+            <button type="submit">保存配置</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>流程操作</h2>
+        <form class="inline" method="post" action="/actions/scrape">
+          <button type="submit">1. 抓取热点</button>
+        </form>
+        <br>
+        <form class="inline" method="post" action="/actions/cluster">
+          <button type="submit" class="secondary">2. 执行聚类</button>
+        </form>
+        <br>
+        <form class="inline" method="post" action="/actions/enrich">
+          <input type="number" name="limit" value="20" min="1" style="width:120px;">
+          <button type="submit" class="warn">3. 正文补抓</button>
+        </form>
+        <br>
+        <form class="inline" method="post" action="/actions/draft">
+          <input type="number" name="limit" value="1" min="1" style="width:120px;">
+          <button type="submit">4. 生成初稿</button>
+        </form>
+        <br>
+        <form class="inline" method="post" action="/actions/run-all">
+          <input type="number" name="draft_limit" value="1" min="1" style="width:120px;">
+          <button type="submit" class="secondary">一键跑全流程</button>
+        </form>
+        <p style="margin-top:16px;color:#475569;">归档目录：<code>{{ runtime.draft_output_dir }}</code></p>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:20px;">
+      <h2>最近热点聚类</h2>
+      {% if clusters %}
+        {% for cluster in clusters %}
+          <div class="cluster">
+            <strong>{{ cluster.canonical_title }}</strong>
+            <div>聚类ID：{{ cluster.cluster_id }} ｜ 成员数：{{ cluster.item_count }} ｜ 信号分：{{ '%.2f'|format(cluster.signal_score) }}</div>
+            <div style="margin-top:6px;color:#475569;">{{ cluster.cluster_summary }}</div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p>暂无聚类结果。</p>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>
