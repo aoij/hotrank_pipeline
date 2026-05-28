@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-import mimetypes
+import json
 import re
 from io import BytesIO
 from pathlib import Path
@@ -23,25 +23,32 @@ DEFAULT_MAX_IMAGES = 4
 ARTICLE_STYLE = (
     "color:#1f2937;"
     "font:16px/1.9 -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;"
-    "word-break:break-word;"
+    "word-break:break-word;letter-spacing:.02em;box-sizing:border-box;"
 )
 
 STYLE_MAP = {
+    "h1": "font-size:26px;line-height:1.45;margin:0 0 18px;color:#111827;font-weight:700;",
     "h2": (
         "font-size:22px;line-height:1.55;margin:30px 0 14px;"
-        "padding-left:12px;border-left:4px solid #2563eb;color:#111827;font-weight:700;"
+        "padding-left:12px;border-left:4px solid #2563eb;color:#111827;font-weight:700;box-sizing:border-box;"
     ),
     "h3": "font-size:18px;line-height:1.55;margin:22px 0 10px;color:#111827;font-weight:700;",
-    "p": "margin:14px 0;line-height:1.9;color:#1f2937;font-size:16px;",
+    "p": "margin:14px 0;line-height:1.9;color:#1f2937;font-size:16px;text-align:justify;",
     "blockquote": (
         "margin:16px 0;padding:12px 14px;background:#f8fafc;"
-        "border-left:4px solid #93c5fd;color:#475569;"
+        "border-left:4px solid #93c5fd;color:#475569;box-sizing:border-box;"
     ),
     "ul": "padding-left:22px;margin:14px 0;",
     "ol": "padding-left:22px;margin:14px 0;",
     "li": "margin:6px 0;line-height:1.8;",
-    "img": "display:block;max-width:100%;height:auto;margin:18px auto;border-radius:12px;",
-    "table": "width:100%;border-collapse:collapse;margin:18px 0;font-size:14px;",
+    "strong": "font-weight:700;color:#111827;",
+    "em": "font-style:normal;color:#475569;",
+    "a": "color:#2563eb;text-decoration:none;border-bottom:1px solid #bfdbfe;",
+    "hr": "border:0;border-top:1px solid #e5e7eb;margin:26px 0;",
+    "code": "font-family:Menlo,Consolas,monospace;background:#f1f5f9;border-radius:4px;padding:2px 4px;font-size:14px;",
+    "pre": "white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin:16px 0;font-size:14px;line-height:1.7;",
+    "img": "display:block;width:100%;max-width:100%;height:auto;margin:18px auto;border-radius:12px;box-sizing:border-box;",
+    "table": "width:100%;border-collapse:collapse;margin:18px 0;font-size:14px;box-sizing:border-box;",
     "th": "border:1px solid #dbe3ef;padding:8px 10px;",
     "td": "border:1px solid #dbe3ef;padding:8px 10px;",
 }
@@ -70,17 +77,29 @@ def _short_title(title: str, byte_limit: int = TITLE_BYTE_LIMIT) -> str:
     return result.rstrip("，。！？、：；-— ") or value[:12]
 
 
-def _image_bytes_for_wechat(path: Path) -> tuple[str, str, bytes]:
-    content_type = mimetypes.guess_type(path.name)[0] or "image/png"
-    if content_type in {"image/jpeg", "image/png"}:
-        return path.name, content_type, path.read_bytes()
+def _open_rgb_image(path: Path) -> Image.Image:
+    with Image.open(path) as source:
+        source = ImageOps.exif_transpose(source)
+        if source.mode in {"RGBA", "LA"} or "transparency" in source.info:
+            rgba = source.convert("RGBA")
+            canvas = Image.new("RGB", rgba.size, "white")
+            canvas.paste(rgba, mask=rgba.getchannel("A"))
+            return canvas
+        return source.convert("RGB")
 
-    # 微信正文图片接口对部分 gif/webp 会返回 invalid file type，统一转 JPEG 更稳。
-    with Image.open(path) as image:
-        image = ImageOps.exif_transpose(image).convert("RGB")
+
+def _jpeg_image_bytes(path: Path, max_size: tuple[int, int], quality: int = 88) -> bytes:
+    with _open_rgb_image(path) as image:
+        image.thumbnail(max_size)
         output = BytesIO()
-        image.save(output, format="JPEG", quality=86, optimize=True)
-    return f"{path.stem}.jpg", "image/jpeg", output.getvalue()
+        image.save(output, format="JPEG", quality=quality, optimize=True)
+        return output.getvalue()
+
+
+def _image_bytes_for_wechat(path: Path) -> tuple[str, str, bytes]:
+    # 微信正文图片接口对部分 png/gif/webp 或异常编码图片会返回 invalid image format。
+    # 统一用 Pillow 重编码成 RGB JPEG，避免公众号草稿插图上传失败。
+    return f"{path.stem}.jpg", "image/jpeg", _jpeg_image_bytes(path, max_size=(1280, 1280), quality=88)
 
 
 def _image_payload(path: Path, placeholder: str | None = None) -> dict[str, str]:
@@ -94,10 +113,9 @@ def _image_payload(path: Path, placeholder: str | None = None) -> dict[str, str]
 
 
 def _cover_payload(path: Path) -> dict[str, str]:
-    with Image.open(path) as image:
-        image = ImageOps.exif_transpose(image).convert("RGB")
+    with _open_rgb_image(path) as image:
         image.thumbnail((900, 500))
-        canvas = Image.new("RGB", (900, 500), "white")
+        canvas = Image.new("RGB", (900, 500), "#f8fafc")
         canvas.paste(image, ((900 - image.width) // 2, (500 - image.height) // 2))
         output = BytesIO()
         canvas.save(output, format="JPEG", quality=82, optimize=True)
@@ -106,8 +124,6 @@ def _cover_payload(path: Path) -> dict[str, str]:
         "content_type": "image/jpeg",
         "content_base64": base64.b64encode(output.getvalue()).decode("ascii"),
     }
-
-
 
 
 def _fallback_cover_payload() -> dict[str, str]:
@@ -131,6 +147,18 @@ def _inline_styles(soup: BeautifulSoup) -> None:
     for tag, style in STYLE_MAP.items():
         for element in soup.find_all(tag):
             element["style"] = style
+
+
+def _read_markdown(path: Path) -> str:
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        # 兼容少量从 Windows 工具另存的 GBK/GB18030 文档，避免推送到公众号时出现乱码。
+        text = raw.decode("gb18030", errors="replace")
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\ufeff", "")
+    text = text.replace("\u00a0", " ")
+    return text
 
 
 def _markdown_to_payload_html(
@@ -198,7 +226,7 @@ def publish_draft_to_wechat(settings: Settings, draft_id: int) -> dict[str, Any]
         raise RuntimeError(f"稿件归档文件不存在：{archive_path}")
 
     title = _short_title(draft.get("title") or draft.get("canonical_title") or archive_path.stem)
-    content_md = archive_path.read_text(encoding="utf-8")
+    content_md = _read_markdown(archive_path)
     content_html, images, cover_path = _markdown_to_payload_html(
         content_md=content_md,
         title=title,
@@ -216,8 +244,11 @@ def publish_draft_to_wechat(settings: Settings, draft_id: int) -> dict[str, Any]
 
     response = requests.post(
         f"{config['base_url']}/api/wechat/drafts",
-        json=payload,
-        headers={"Authorization": f"Bearer {config['token']}"},
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {config['token']}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
         timeout=config["timeout_seconds"],
     )
     try:

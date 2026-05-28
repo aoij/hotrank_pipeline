@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import markdown
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -33,6 +34,39 @@ templates = Jinja2Templates(directory=str(Path(__file__).resolve().parents[2] / 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 _RUN_LOCK = threading.Lock()
 _RUN_STATE = {"running": False, "action": ""}
+
+WECHAT_ARTICLE_STYLE = (
+    "color:#1f2937;"
+    "font:16px/1.9 -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;"
+    "word-break:break-word;letter-spacing:.02em;box-sizing:border-box;"
+)
+
+WECHAT_STYLE_MAP = {
+    "h1": "font-size:26px;line-height:1.45;margin:0 0 18px;color:#111827;font-weight:700;",
+    "h2": (
+        "font-size:22px;line-height:1.55;margin:30px 0 14px;"
+        "padding-left:12px;border-left:4px solid #2563eb;color:#111827;font-weight:700;box-sizing:border-box;"
+    ),
+    "h3": "font-size:18px;line-height:1.55;margin:22px 0 10px;color:#111827;font-weight:700;",
+    "p": "margin:14px 0;line-height:1.9;color:#1f2937;font-size:16px;text-align:justify;",
+    "blockquote": (
+        "margin:16px 0;padding:12px 14px;background:#f8fafc;"
+        "border-left:4px solid #93c5fd;color:#475569;box-sizing:border-box;"
+    ),
+    "ul": "padding-left:22px;margin:14px 0;",
+    "ol": "padding-left:22px;margin:14px 0;",
+    "li": "margin:6px 0;line-height:1.8;",
+    "strong": "font-weight:700;color:#111827;",
+    "em": "font-style:normal;color:#475569;",
+    "a": "color:#2563eb;text-decoration:none;border-bottom:1px solid #bfdbfe;",
+    "hr": "border:0;border-top:1px solid #e5e7eb;margin:26px 0;",
+    "code": "font-family:Menlo,Consolas,monospace;background:#f1f5f9;border-radius:4px;padding:2px 4px;font-size:14px;",
+    "pre": "white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin:16px 0;font-size:14px;line-height:1.7;",
+    "img": "display:block;width:100%;max-width:100%;height:auto;margin:18px auto;border-radius:12px;box-sizing:border-box;",
+    "table": "width:100%;border-collapse:collapse;margin:18px 0;font-size:14px;box-sizing:border-box;",
+    "th": "border:1px solid #dbe3ef;padding:8px 10px;",
+    "td": "border:1px solid #dbe3ef;padding:8px 10px;",
+}
 
 
 def _run_with_log(action_name: str, start_message: str, fn):
@@ -120,11 +154,15 @@ def _rewrite_asset_sources(rendered_html: str, asset_base_dir: Path | None) -> s
 
 def _render_markdown_to_wechat_html(content_md: str, asset_base_dir: Path | None = None) -> str:
     rendered = markdown.markdown(
-        content_md or "",
+        (content_md or "").replace("\ufeff", ""),
         extensions=["extra", "sane_lists", "tables", "nl2br", "fenced_code"],
         output_format="html5",
     )
-    return _rewrite_asset_sources(rendered, asset_base_dir)
+    soup = BeautifulSoup(rendered, "html.parser")
+    for tag, style in WECHAT_STYLE_MAP.items():
+        for element in soup.find_all(tag):
+            element["style"] = style
+    return _rewrite_asset_sources(soup.decode(), asset_base_dir)
 
 
 def _render_markdown_to_wechat_html_document(content_md: str, asset_base_dir: Path | None = None) -> str:
@@ -136,8 +174,8 @@ def _render_markdown_to_wechat_html_document(content_md: str, asset_base_dir: Pa
   <title>微信公众号文章预览</title>
   <style>
     body {{ margin: 0; padding: 24px; background: #f6f7f9; color: #1f2937; }}
-    .wx-article {{ max-width: 720px; margin: 0 auto; padding: 28px; background: #fff; font: 16px/1.9 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }}
-    .wx-article h1 {{ font-size: 28px; line-height: 1.45; margin: 0 0 18px; color: #111827; }}
+    .wx-article {{ max-width: 720px; margin: 0 auto; padding: 28px; background: #fff; {WECHAT_ARTICLE_STYLE} }}
+    .wx-article h1 {{ font-size: 26px; line-height: 1.45; margin: 0 0 18px; color: #111827; }}
     .wx-article h2 {{ font-size: 22px; line-height: 1.55; margin: 30px 0 14px; padding-left: 12px; border-left: 4px solid #2563eb; color: #111827; }}
     .wx-article h3 {{ font-size: 18px; line-height: 1.55; margin: 22px 0 10px; color: #111827; }}
     .wx-article p {{ margin: 14px 0; }}
@@ -149,7 +187,7 @@ def _render_markdown_to_wechat_html_document(content_md: str, asset_base_dir: Pa
   </style>
 </head>
 <body>
-  <article class="wx-article">
+  <article class="wx-article" style="{WECHAT_ARTICLE_STYLE}">
 {article_html}
   </article>
 </body>
@@ -173,7 +211,12 @@ def _safe_open_local_markdown(path_value: str) -> tuple[Path, str]:
     if target.suffix.lower() != ".md":
         raise HTTPException(status_code=400, detail="仅支持打开 Markdown 稿件")
 
-    return target, target.read_text(encoding="utf-8")
+    raw = target.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("gb18030", errors="replace")
+    return target, text.replace("\r\n", "\n").replace("\r", "\n").replace("\ufeff", "")
 
 
 def _safe_resolve_local_path(path_value: str) -> Path:

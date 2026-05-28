@@ -1,4 +1,4 @@
-﻿# hotrank_pipeline
+# hotrank_pipeline
 
 TopHub 新闻页热点抓取与公众号草稿生成项目，使用本地 PostgreSQL 持久化、聚类、正文补抓，并支持通过 Web 页面配置最终生成模型。
 
@@ -15,6 +15,8 @@ TopHub 新闻页热点抓取与公众号草稿生成项目，使用本地 Postgr
   - 优先使用正文来源图片（如澎湃）
   - 支持限制“每篇最多插图数 / 单来源最多取图数”
 - 支持把已生成初稿一键上传到微信公众号草稿箱
+  - 草稿 JSON 使用 UTF-8 直传，避免中文在公众号后台显示成 `\uXXXX`
+  - Markdown 会转换成公众号友好的内联 HTML 样式，并自动上传封面与正文插图
 - 按“月份 / 天”两级目录归档到 `T:\微信公众号文档`
 - 提供 FastAPI Web 页面配置模型、API、白名单并触发流程
 - 内置公众号 Markdown 编辑器，支持打开已生成稿件后直接实时渲染预览
@@ -86,6 +88,31 @@ python .\run.py enrich-articles
 ```powershell
 python .\run.py generate-drafts --limit 1
 ```
+
+## 推送到微信公众号草稿箱
+
+先在 Web 配置页填好 `微信公众号网关地址` 和 `微信公众号网关 Token`，也可以直接写入 `local_settings.json` 的 `wechat_gateway`：
+
+```json
+{
+  "wechat_gateway": {
+    "base_url": "http://106.12.11.147:18080",
+    "token": "your-gateway-token",
+    "max_images": 4
+  }
+}
+```
+
+然后可以：
+
+- 在“公众号编辑器”打开某篇已生成初稿，点击“推送到微信公众号草稿箱”。
+- 或命令行批量推送高分稿件：
+
+```powershell
+python .\run.py publish-wechat-drafts --limit 10
+```
+
+推送时会读取归档 Markdown，转成公众号内联 HTML，并把本地图片上传成微信图片 URL；正文图片异常时会统一重编码为 JPEG，减少微信接口 `invalid image format` 问题。
 
 ## 一键跑完整流程
 
@@ -171,4 +198,3 @@ order by s.fetched_at desc, i.rank_num asc;
 1. 更强的原文抓取适配器
 2. 发布前人工审核页
 3. 已发文记录与复盘统计
-
