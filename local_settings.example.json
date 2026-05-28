@@ -31,7 +31,8 @@
     "api_key": "",
     "model": "mimo-v2.5",
     "temperature": 0.65,
-    "max_tokens": 2400
+    "max_tokens": 2400,
+    "draft_prompt": ""
   },
   "draft_output_dir": "T:\\微信公众号文档"
 }

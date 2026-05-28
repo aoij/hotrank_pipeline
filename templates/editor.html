@@ -180,6 +180,16 @@
       font-size: 12px;
       color: var(--light);
     }
+    .copy-tip {
+      margin: 10px 20px 0;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: #f8fafc;
+      border: 1px dashed #cbd5e1;
+      color: #64748b;
+      font-size: 12px;
+      line-height: 1.7;
+    }
     textarea {
       width: 100%;
       min-height: 900px;
@@ -387,6 +397,7 @@
             </div>
           </div>
           <p class="panel-desc">适合继续润色公众号草稿、调段落结构、补标题、删改图片与小节层级。</p>
+          <div class="copy-tip">注意：复制 Markdown 源码只会复制图片路径，不会把本地图片文件上传到公众号后台；要尽量带上图片，请用右侧“复制公众号格式”。该按钮会尝试把本地图片转成内嵌图片后再复制。</div>
           <div class="panel-body">
             <div class="editor-shell">
               <textarea id="markdownInput" spellcheck="false">{{ content_md }}</textarea>
@@ -398,7 +409,9 @@
           <div class="panel-head">
             <h2>公众号预览区</h2>
             <div class="toolbar">
-              <a class="btn-link" id="copyHtmlBtn" href="javascript:void(0)">复制渲染文本</a>
+              <a class="btn-link primary" id="copyRichBtn" href="javascript:void(0)">复制公众号格式</a>
+              <a class="btn-link" id="copyHtmlBtn" href="javascript:void(0)">复制 HTML</a>
+              <a class="btn-link" id="openHtmlBtn" href="javascript:void(0)">打开 HTML</a>
               <span class="tool-note">预览仅供参考，请以公众号后台最终样式为准</span>
             </div>
           </div>
@@ -425,6 +438,8 @@
     const previewTitle = document.getElementById("previewTitle");
     const copyMarkdownBtn = document.getElementById("copyMarkdownBtn");
     const copyHtmlBtn = document.getElementById("copyHtmlBtn");
+    const copyRichBtn = document.getElementById("copyRichBtn");
+    const openHtmlBtn = document.getElementById("openHtmlBtn");
     const assetBasePath = {{ (asset_base_path or '') | tojson }};
 
     let renderTimer = null;
@@ -464,10 +479,100 @@
       setTimeout(() => copyMarkdownBtn.textContent = "复制 Markdown", 1400);
     });
 
+    function articleHtmlDocument(innerHtml) {
+      return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { margin:0; padding:0; background:#fff; }
+    .wx-article { color:#1f2937; font:16px/1.9 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    .wx-article h1 { font-size:28px; line-height:1.45; margin:0 0 18px; color:#111827; }
+    .wx-article h2 { font-size:22px; line-height:1.55; margin:30px 0 14px; padding-left:12px; border-left:4px solid #2563eb; color:#111827; }
+    .wx-article h3 { font-size:18px; line-height:1.55; margin:22px 0 10px; color:#111827; }
+    .wx-article p { margin:14px 0; }
+    .wx-article blockquote { margin:16px 0; padding:12px 14px; background:#f8fafc; border-left:4px solid #93c5fd; color:#475569; }
+    .wx-article ul,.wx-article ol { padding-left:22px; margin:14px 0; }
+    .wx-article img { display:block; max-width:100%; margin:18px auto; border-radius:12px; }
+    .wx-article table { width:100%; border-collapse:collapse; margin:18px 0; font-size:14px; }
+    .wx-article th,.wx-article td { border:1px solid #dbe3ef; padding:8px 10px; }
+  </style>
+</head>
+<body><article class="wx-article">${innerHtml || previewArticle.innerHTML || ""}</article></body>
+</html>`;
+    }
+
+    function blobToDataUrl(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    async function articleHtmlWithInlineImages() {
+      const clone = previewArticle.cloneNode(true);
+      const images = Array.from(clone.querySelectorAll("img"));
+      await Promise.all(images.map(async (img) => {
+        const source = img.getAttribute("src") || "";
+        if (!source || source.startsWith("data:")) {
+          return;
+        }
+        try {
+          const absoluteUrl = new URL(source, window.location.href).toString();
+          const response = await fetch(absoluteUrl, { cache: "no-store" });
+          if (!response.ok) {
+            return;
+          }
+          const blob = await response.blob();
+          if (!blob.type.startsWith("image/")) {
+            return;
+          }
+          img.setAttribute("src", await blobToDataUrl(blob));
+        } catch (err) {
+          // Keep original src if the image cannot be inlined.
+        }
+      }));
+      return articleHtmlDocument(clone.innerHTML || "");
+    }
+
     copyHtmlBtn.addEventListener("click", async () => {
-      await navigator.clipboard.writeText(previewArticle.innerText || "");
-      copyHtmlBtn.textContent = "已复制渲染文本";
-      setTimeout(() => copyHtmlBtn.textContent = "复制渲染文本", 1400);
+      const html = await articleHtmlWithInlineImages();
+      await navigator.clipboard.writeText(html);
+      copyHtmlBtn.textContent = "已复制 HTML";
+      setTimeout(() => copyHtmlBtn.textContent = "复制 HTML", 1400);
+    });
+
+    copyRichBtn.addEventListener("click", async () => {
+      copyRichBtn.textContent = "正在内嵌图片...";
+      const html = await articleHtmlWithInlineImages();
+      const plain = previewArticle.innerText || "";
+      try {
+        if (window.ClipboardItem) {
+          await navigator.clipboard.write([
+            new ClipboardItem({
+              "text/html": new Blob([html], { type: "text/html" }),
+              "text/plain": new Blob([plain], { type: "text/plain" })
+            })
+          ]);
+        } else {
+          throw new Error("ClipboardItem unsupported");
+        }
+        copyRichBtn.textContent = "已复制公众号格式";
+      } catch (err) {
+        await navigator.clipboard.writeText(html);
+        copyRichBtn.textContent = "已复制 HTML";
+      }
+      setTimeout(() => copyRichBtn.textContent = "复制公众号格式", 1600);
+    });
+
+    openHtmlBtn.addEventListener("click", async () => {
+      const html = await articleHtmlWithInlineImages();
+      const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank");
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
     });
   </script>
 </body>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from pathlib import Path
 from urllib.parse import quote
 
@@ -27,6 +28,8 @@ settings = get_settings()
 app = FastAPI(title="Hotrank Pipeline")
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parents[2] / "templates"))
 ROOT_DIR = Path(__file__).resolve().parents[2]
+_RUN_LOCK = threading.Lock()
+_RUN_STATE = {"running": False, "action": ""}
 
 
 def _run_with_log(action_name: str, start_message: str, fn):
@@ -36,6 +39,39 @@ def _run_with_log(action_name: str, start_message: str, fn):
     except Exception as exc:
         append_runtime_log("error", f"{action_name}失败：{exc}")
         raise
+
+
+def _set_run_state(running: bool, action: str = "") -> None:
+    with _RUN_LOCK:
+        _RUN_STATE["running"] = running
+        _RUN_STATE["action"] = action
+
+
+def _get_run_state() -> dict[str, str | bool]:
+    with _RUN_LOCK:
+        return dict(_RUN_STATE)
+
+
+def _start_background_job(action_name: str, worker) -> bool:
+    state = _get_run_state()
+    if state["running"]:
+        append_runtime_log("warning", f"已有任务执行中：{state['action']}，本次请求已忽略。")
+        return False
+
+    _set_run_state(True, action_name)
+
+    def runner():
+        append_runtime_log("info", f"任务已进入后台：{action_name}")
+        try:
+            worker()
+        except Exception as exc:
+            append_runtime_log("error", f"{action_name}后台执行失败：{exc}")
+        finally:
+            append_runtime_log("info", f"后台任务结束：{action_name}")
+            _set_run_state(False, "")
+
+    threading.Thread(target=runner, daemon=True).start()
+    return True
 
 
 def _allowed_local_roots() -> list[Path]:
@@ -65,6 +101,7 @@ def _rewrite_asset_sources(rendered_html: str, asset_base_dir: Path | None) -> s
     def replace_src(match: re.Match[str]) -> str:
         before = match.group(1)
         src = (match.group(2) or "").strip()
+        after = match.group(3)
         if not src or re.match(r"^(https?:)?//", src) or src.startswith(("data:", "/", "#")):
             return match.group(0)
         try:
@@ -73,7 +110,7 @@ def _rewrite_asset_sources(rendered_html: str, asset_base_dir: Path | None) -> s
             return match.group(0)
         if not asset_path.exists() or not asset_path.is_file() or not _is_within_allowed_roots(asset_path):
             return match.group(0)
-        return f'{before}src="/draft-asset?path={quote(str(asset_path))}"'
+        return f'{before}/draft-asset?path={quote(str(asset_path))}{after}'
 
     return re.sub(r'(<img\b[^>]*?\bsrc=")([^"]+)(")', replace_src, rendered_html, flags=re.I)
 
@@ -85,6 +122,35 @@ def _render_markdown_to_wechat_html(content_md: str, asset_base_dir: Path | None
         output_format="html5",
     )
     return _rewrite_asset_sources(rendered, asset_base_dir)
+
+
+def _render_markdown_to_wechat_html_document(content_md: str, asset_base_dir: Path | None = None) -> str:
+    article_html = _render_markdown_to_wechat_html(content_md, asset_base_dir=asset_base_dir)
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>微信公众号文章预览</title>
+  <style>
+    body {{ margin: 0; padding: 24px; background: #f6f7f9; color: #1f2937; }}
+    .wx-article {{ max-width: 720px; margin: 0 auto; padding: 28px; background: #fff; font: 16px/1.9 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }}
+    .wx-article h1 {{ font-size: 28px; line-height: 1.45; margin: 0 0 18px; color: #111827; }}
+    .wx-article h2 {{ font-size: 22px; line-height: 1.55; margin: 30px 0 14px; padding-left: 12px; border-left: 4px solid #2563eb; color: #111827; }}
+    .wx-article h3 {{ font-size: 18px; line-height: 1.55; margin: 22px 0 10px; color: #111827; }}
+    .wx-article p {{ margin: 14px 0; }}
+    .wx-article blockquote {{ margin: 16px 0; padding: 12px 14px; background: #f8fafc; border-left: 4px solid #93c5fd; color: #475569; }}
+    .wx-article ul, .wx-article ol {{ padding-left: 22px; margin: 14px 0; }}
+    .wx-article img {{ display: block; max-width: 100%; margin: 18px auto; border-radius: 12px; }}
+    .wx-article table {{ width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 14px; }}
+    .wx-article th, .wx-article td {{ border: 1px solid #dbe3ef; padding: 8px 10px; }}
+  </style>
+</head>
+<body>
+  <article class="wx-article">
+{article_html}
+  </article>
+</body>
+</html>"""
 
 
 def _safe_open_local_markdown(path_value: str) -> tuple[Path, str]:
@@ -149,6 +215,7 @@ def update_config(
     llm_base_url: str = Form(...),
     llm_model: str = Form(...),
     llm_api_key: str = Form(""),
+    llm_draft_prompt: str = Form(""),
     draft_output_dir: str = Form(...),
     board_whitelist: str = Form(...),
     image_max_per_draft: int = Form(6),
@@ -160,6 +227,7 @@ def update_config(
     runtime["llm"]["model"] = llm_model.strip()
     if llm_api_key.strip():
         runtime["llm"]["api_key"] = llm_api_key.strip()
+    runtime["llm"]["draft_prompt"] = llm_draft_prompt.strip()
     runtime["draft_output_dir"] = draft_output_dir.strip()
     runtime["board_whitelist"] = [part.strip() for part in board_whitelist.split(",") if part.strip()]
     runtime.setdefault("images", {})
@@ -195,63 +263,75 @@ def action_cluster():
 
 @app.post("/actions/enrich")
 def action_enrich(limit: int = Form(20)):
-    result = _run_with_log(
-        "正文补抓",
-        f"开始执行：正文补抓，limit={limit}",
-        lambda: run_article_enrichment(settings, limit=limit),
-    )
-    level = "warning" if result["blocked"] or result["errored"] else "success"
-    append_runtime_log(
-        level,
-        (
-            f"补抓完成：processed={result['processed']} fetched={result['fetched']} "
-            f"blocked={result['blocked']} errored={result['errored']}"
-        ),
-    )
+    def progress(level: str, message: str):
+        append_runtime_log(level, message)
+
+    def worker():
+        append_runtime_log("info", f"开始执行：正文补抓，limit={limit}")
+        result = run_article_enrichment(settings, limit=limit, progress_cb=progress)
+        level = "warning" if result["blocked"] or result["errored"] else "success"
+        append_runtime_log(
+            level,
+            (
+                f"补抓完成：processed={result['processed']} fetched={result['fetched']} "
+                f"blocked={result['blocked']} errored={result['errored']}"
+            ),
+        )
+
+    started = _start_background_job("正文补抓", worker)
+    message = "正文补抓已开始，正在后台处理，可直接看前方日志面板。" if started else "已有任务执行中，请先查看前方日志进度。"
     return RedirectResponse(
-        url=f"/?message=补抓完成：processed={result['processed']} fetched={result['fetched']}",
+        url=f"/?message={quote(message)}",
         status_code=303,
     )
 
 
 @app.post("/actions/draft")
 def action_draft(limit: int = Form(1)):
-    result = _run_with_log(
-        "生成初稿",
-        f"开始执行：生成初稿，limit={limit}",
-        lambda: run_generate_drafts(settings, limit=limit),
-    )
-    draft = result["drafts"][0] if result["drafts"] else None
-    if draft:
-        append_runtime_log(
-            "success",
-            f"初稿完成：{draft['title']}（配图 {draft['image_count']} 张）",
-        )
-    else:
-        append_runtime_log("warning", "初稿生成完成，但本次没有生成新稿件。")
+    def progress(level: str, message: str):
+        append_runtime_log(level, message)
+
+    def worker():
+        append_runtime_log("info", f"开始执行：生成初稿，limit={limit}")
+        result = run_generate_drafts(settings, limit=limit, progress_cb=progress)
+        draft = result["drafts"][0] if result["drafts"] else None
+        if draft:
+            append_runtime_log(
+                "success",
+                f"初稿完成：{draft['title']}（配图 {draft['image_count']} 张）",
+            )
+        else:
+            append_runtime_log("warning", "初稿生成完成，但本次没有生成新稿件。")
+
+    started = _start_background_job("生成初稿", worker)
+    message = "生成初稿已开始，正在后台处理，可直接看前方日志面板。" if started else "已有任务执行中，请先查看前方日志进度。"
     return RedirectResponse(
-        url=f"/?message=初稿完成：generated={result['generated_count']}",
+        url=f"/?message={quote(message)}",
         status_code=303,
     )
 
 
 @app.post("/actions/run-all")
 def action_run_all(draft_limit: int = Form(1)):
-    result = _run_with_log(
-        "一键跑全流程",
-        f"开始执行：一键跑全流程，draft_limit={draft_limit}",
-        lambda: run_full_pipeline(settings, draft_limit=draft_limit),
-    )
-    generated = result["draft"]["generated_count"]
-    append_runtime_log(
-        "success",
-        (
-            f"全流程完成：scrape_boards={result['scrape']['board_count']} "
-            f"clusters={result['cluster']['cluster_count']} drafts={generated}"
-        ),
-    )
+    def progress(level: str, message: str):
+        append_runtime_log(level, message)
+
+    def worker():
+        append_runtime_log("info", f"开始执行：一键跑全流程，draft_limit={draft_limit}")
+        result = run_full_pipeline(settings, draft_limit=draft_limit, progress_cb=progress)
+        generated = result["draft"]["generated_count"]
+        append_runtime_log(
+            "success",
+            (
+                f"全流程完成：scrape_boards={result['scrape']['board_count']} "
+                f"clusters={result['cluster']['cluster_count']} drafts={generated}"
+            ),
+        )
+
+    started = _start_background_job("一键跑全流程", worker)
+    message = "一键执行已开始，正在后台持续处理，可直接看前方日志面板。" if started else "已有任务执行中，请先查看前方日志进度。"
     return RedirectResponse(
-        url=f"/?message=全流程完成：drafts={generated}",
+        url=f"/?message={quote(message)}",
         status_code=303,
     )
 
@@ -329,6 +409,20 @@ def render_markdown(content: str = Form(...), asset_base_path: str = Form("")):
     )
 
 
+@app.post("/api/render-html-document")
+def render_html_document(content: str = Form(...), asset_base_path: str = Form("")):
+    asset_base_dir = None
+    if asset_base_path.strip():
+        try:
+            asset_base_dir = _safe_resolve_local_path(asset_base_path.strip()).parent
+        except HTTPException:
+            asset_base_dir = None
+    return HTMLResponse(
+        _render_markdown_to_wechat_html_document(content, asset_base_dir=asset_base_dir),
+        media_type="text/html; charset=utf-8",
+    )
+
+
 @app.get("/draft-asset")
 def draft_asset(path: str):
     target = _safe_resolve_local_path(path)
@@ -342,6 +436,7 @@ def runtime_logs(limit: int = 80):
         {
             "logs": logs,
             "notice": latest_notice(logs),
+            "run_state": _get_run_state(),
         },
         media_type="application/json; charset=utf-8",
     )
