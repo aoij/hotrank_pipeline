@@ -78,6 +78,76 @@
       color: #fff;
     }
 
+    .btn-link:disabled,
+    .btn-link.is-loading {
+      cursor: wait !important;
+      opacity: .72;
+      pointer-events: none;
+    }
+
+    .regen-overlay {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(15, 23, 42, .42);
+      backdrop-filter: blur(4px);
+      z-index: 9999;
+    }
+
+    .regen-overlay.show {
+      display: flex;
+    }
+
+    .regen-dialog {
+      width: min(92vw, 460px);
+      padding: 28px;
+      border-radius: 24px;
+      background: #fff;
+      box-shadow: 0 24px 70px rgba(15, 23, 42, .28);
+      text-align: center;
+      border: 1px solid rgba(219, 227, 239, .9);
+    }
+
+    .regen-spinner {
+      width: 46px;
+      height: 46px;
+      margin: 0 auto 18px;
+      border-radius: 999px;
+      border: 4px solid #dbeafe;
+      border-top-color: #2563eb;
+      animation: spin .85s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .regen-dialog h3 {
+      margin: 0;
+      font-size: 20px;
+      color: #0f172a;
+    }
+
+    .regen-dialog p {
+      margin: 12px 0 0;
+      color: #475569;
+      line-height: 1.7;
+      font-size: 14px;
+    }
+
+    .regen-dialog .regen-hint {
+      margin-top: 14px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: #eff6ff;
+      color: #1d4ed8;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
     .meta-grid {
       display: grid;
       grid-template-columns: 330px minmax(0, 1fr);
@@ -403,8 +473,8 @@
             <a class="btn-link primary" href="/editor" style="width: 100%;">打开空白编辑器</a>
           </div>
           {% if source_type == 'db' and source_id %}
-          <form method="post" action="/editor/{{ source_id }}/regenerate-images" style="margin-top: 12px;">
-            <button class="btn-link" type="submit" style="width: 100%; cursor: pointer;">重新生成插图</button>
+          <form method="post" action="/editor/{{ source_id }}/regenerate-images" style="margin-top: 12px;" id="regenerateImagesForm">
+            <button class="btn-link" type="submit" style="width: 100%; cursor: pointer;" id="regenerateImagesBtn">重新生成插图</button>
           </form>
           <div class="copy-tip" style="margin: 10px 0 0;">会删除当前稿件中的 Markdown 图片引用，并按当前生图配置重新生成插图；如果生图失败，会按配置回退原文取图。</div>
           {% endif %}
@@ -488,6 +558,15 @@
     </section>
   </div>
 
+  <div class="regen-overlay" id="regenOverlay" aria-hidden="true">
+    <div class="regen-dialog" role="status" aria-live="polite">
+      <div class="regen-spinner"></div>
+      <h3>正在重新生成插图</h3>
+      <p>系统正在删除旧图片引用，并按当前生图配置重新生成插图。</p>
+      <div class="regen-hint">AI 生图可能需要 1-5 分钟，请不要关闭页面或重复点击。完成后会自动回到当前稿件。</div>
+    </div>
+  </div>
+
   <script>
     const markdownInput = document.getElementById("markdownInput");
     const previewArticle = document.getElementById("previewArticle");
@@ -496,6 +575,9 @@
     const copyHtmlBtn = document.getElementById("copyHtmlBtn");
     const copyRichBtn = document.getElementById("copyRichBtn");
     const openHtmlBtn = document.getElementById("openHtmlBtn");
+    const regenerateImagesForm = document.getElementById("regenerateImagesForm");
+    const regenerateImagesBtn = document.getElementById("regenerateImagesBtn");
+    const regenOverlay = document.getElementById("regenOverlay");
     const assetBasePath = {{ (asset_base_path or '') | tojson }};
 
     let renderTimer = null;
@@ -528,6 +610,16 @@
         refreshPreview().catch(() => {});
       }, 350);
     });
+
+    if (regenerateImagesForm && regenerateImagesBtn && regenOverlay) {
+      regenerateImagesForm.addEventListener("submit", () => {
+        regenerateImagesBtn.disabled = true;
+        regenerateImagesBtn.classList.add("is-loading");
+        regenerateImagesBtn.textContent = "正在生成插图，请稍候...";
+        regenOverlay.classList.add("show");
+        regenOverlay.setAttribute("aria-hidden", "false");
+      });
+    }
 
     copyMarkdownBtn.addEventListener("click", async () => {
       await navigator.clipboard.writeText(markdownInput.value || "");
