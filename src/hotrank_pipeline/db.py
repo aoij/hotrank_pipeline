@@ -400,12 +400,17 @@ def fetch_recent_drafts(settings: Settings, limit: int = 20) -> list[dict]:
                     d.model_name,
                     d.title,
                     d.archive_path,
+                    d.review_score,
+                    d.review_summary,
+                    d.review_model,
+                    d.reviewed_at,
                     d.created_at,
                     tc.canonical_title,
+                    to_char(d.reviewed_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as reviewed_at_text,
                     to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
                 from article_drafts d
                 join topic_clusters tc on tc.id = d.cluster_id
-                order by d.created_at desc, d.id desc
+                order by d.review_score desc nulls last, d.created_at desc, d.id desc
                 limit %s
                 """,
                 (limit,),
@@ -427,8 +432,13 @@ def fetch_draft_by_id(settings: Settings, draft_id: int) -> dict | None:
                     d.content_md,
                     d.archive_path,
                     d.prompt_excerpt,
+                    d.review_score,
+                    d.review_summary,
+                    d.review_model,
+                    d.reviewed_at,
                     d.created_at,
                     tc.canonical_title,
+                    to_char(d.reviewed_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as reviewed_at_text,
                     to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
                 from article_drafts d
                 join topic_clusters tc on tc.id = d.cluster_id
@@ -439,6 +449,57 @@ def fetch_draft_by_id(settings: Settings, draft_id: int) -> dict | None:
             )
             row = cur.fetchone()
             return dict(row) if row else None
+
+
+def fetch_unreviewed_drafts(settings: Settings, limit: int = 10) -> list[dict]:
+    with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select
+                    d.id,
+                    d.cluster_id,
+                    d.model_name,
+                    d.title,
+                    d.content_md,
+                    d.archive_path,
+                    d.created_at,
+                    tc.canonical_title,
+                    to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
+                from article_drafts d
+                join topic_clusters tc on tc.id = d.cluster_id
+                where d.review_score is null
+                order by d.created_at desc, d.id desc
+                limit %s
+                """,
+                (limit,),
+            )
+            return list(cur.fetchall())
+
+
+def update_draft_review(
+    settings: Settings,
+    draft_id: int,
+    review_score: float,
+    review_summary: str,
+    review_model: str,
+) -> None:
+    score = max(0.0, min(10.0, round(float(review_score), 1)))
+    with get_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                update article_drafts
+                set
+                    review_score = %s,
+                    review_summary = %s,
+                    review_model = %s,
+                    reviewed_at = now()
+                where id = %s
+                """,
+                (score, review_summary, review_model, draft_id),
+            )
+        conn.commit()
 
 
 def fetch_cluster_sources_for_generation(settings: Settings, limit: int = 1) -> list[dict]:

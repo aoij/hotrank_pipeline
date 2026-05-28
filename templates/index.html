@@ -899,6 +899,65 @@
       font-variant-numeric: tabular-nums;
     }
 
+    .score-pill.article-score {
+      background: var(--violet-soft);
+      color: var(--violet);
+      border: 1px solid #ddd6fe;
+    }
+
+    .score-pill.unscored {
+      background: var(--surface-muted);
+      color: var(--text-mute);
+      border: 1px solid var(--border);
+    }
+
+    .draft-card-mini {
+      display: block;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--surface-soft);
+      color: var(--text-main);
+      transition: border-color 0.15s ease, transform 0.15s ease, background 0.15s ease;
+    }
+
+    .draft-card-mini:hover {
+      border-color: var(--primary-soft-2);
+      background: #fff;
+      transform: translateY(-1px);
+    }
+
+    .draft-card-mini .draft-topline {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .draft-card-mini .draft-title {
+      font-weight: 600;
+      line-height: 1.5;
+      font-size: 13.5px;
+    }
+
+    .draft-card-mini .draft-meta {
+      margin-top: 5px;
+      font-size: 12px;
+      color: var(--text-light);
+      line-height: 1.6;
+    }
+
+    .draft-card-mini .draft-summary {
+      margin-top: 5px;
+      color: var(--text-sub);
+      font-size: 12px;
+      line-height: 1.55;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
     .cluster-meta {
       display: flex;
       flex-wrap: wrap;
@@ -1211,7 +1270,7 @@
                   <span class="step-num">04</span>
                   <h3>生成初稿</h3>
                 </div>
-                <p>用当前模型输出适配微信公众号的文章草稿，并自动插入多张配图。</p>
+                <p>用当前模型输出适配微信公众号的文章草稿，自动插图，并生成文章审核分。</p>
                 <form class="inline-form action-foot" method="post" action="/actions/draft">
                   <input type="number" name="limit" value="1" min="1">
                   <button type="submit">开始成稿</button>
@@ -1224,7 +1283,7 @@
                 <span class="step-num">★</span>
                 <h3>一键跑全流程</h3>
               </div>
-              <p>自动执行抓取 → 聚类 → 正文补抓 → 公众号初稿生成，适合晨间或晚间整批处理。</p>
+              <p>自动执行抓取 → 聚类 → 正文补抓 → 初稿生成 → 模型评分，适合晨间或晚间整批处理。</p>
               <form class="inline-form action-foot" method="post" action="/actions/run-all">
                 <input type="number" name="draft_limit" value="1" min="1">
                 <button type="submit" class="secondary">一键执行</button>
@@ -1233,19 +1292,41 @@
 
             <div class="action-card step-extra" style="margin-top: 14px;">
               <div class="step-row">
+                <span class="step-num">分</span>
+                <h3>模型审核评分</h3>
+              </div>
+              <p>让模型重读已生成但未评分的初稿，按公众号发布可用度打 0-10 分；列表会优先展示高分、再展示最新。</p>
+              <form class="inline-form action-foot" method="post" action="/actions/review-drafts">
+                <input type="number" name="limit" value="10" min="1">
+                <button type="submit" class="ghost">补评分</button>
+              </form>
+            </div>
+
+            <div class="action-card step-extra" style="margin-top: 14px;">
+              <div class="step-row">
                 <span class="step-num"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4z"/></svg></span>
                 <h3>公众号编辑器</h3>
               </div>
-              <p>左侧改 Markdown，右侧实时渲染预览，可直接打开已生成的稿件继续编辑。</p>
+              <p>这里展示“已生成初稿”，按文章审核分优先排序；左侧改 Markdown，右侧实时渲染预览。</p>
               <div class="inline-form action-foot">
                 <a href="/editor" class="page-btn" style="min-width: 140px; height: 40px; border-color: var(--primary-soft-2); color: var(--primary); background: var(--primary-soft);">打开编辑器</a>
               </div>
               {% if recent_drafts %}
               <div style="margin-top: 8px; display: grid; gap: 8px;">
                 {% for draft in recent_drafts %}
-                <a href="/editor?draft_id={{ draft.id }}" style="display:block; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-soft); color: var(--text-main);">
-                  <div style="font-weight: 600; line-height: 1.5; font-size: 13.5px;">{{ draft.title }}</div>
-                  <div style="margin-top: 4px; font-size: 12px; color: var(--text-light);">{{ draft.created_at_text }}</div>
+                <a href="/editor?draft_id={{ draft.id }}" class="draft-card-mini">
+                  <div class="draft-topline">
+                    <div class="draft-title">{{ draft.title }}</div>
+                    {% if draft.review_score is not none %}
+                    <span class="score-pill article-score">文章分 {{ '%.1f'|format(draft.review_score) }}</span>
+                    {% else %}
+                    <span class="score-pill unscored">未评分</span>
+                    {% endif %}
+                  </div>
+                  <div class="draft-meta">{{ draft.created_at_text }}{% if draft.review_model %} ｜ {{ draft.review_model }}{% endif %}</div>
+                  {% if draft.review_summary %}
+                  <div class="draft-summary">{{ draft.review_summary }}</div>
+                  {% endif %}
                 </a>
                 {% endfor %}
               </div>
@@ -1258,7 +1339,7 @@
           <div class="section-head">
             <div>
               <h2>最近热点聚类</h2>
-              <p>按最新时间倒序展示，附带精确时间点；当前显示 {{ cluster_pagination.start_index }} - {{ cluster_pagination.end_index }} / {{ cluster_pagination.total }}。</p>
+              <p>这是“热点候选池”，信号分只代表聚类热度/候选强度，不是文章审核分；当前显示 {{ cluster_pagination.start_index }} - {{ cluster_pagination.end_index }} / {{ cluster_pagination.total }}。</p>
             </div>
             <div class="section-tools">
               <span class="metric-pill">当前页 {{ cluster_pagination.page }} / {{ cluster_pagination.total_pages }}</span>

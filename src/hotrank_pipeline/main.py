@@ -10,6 +10,7 @@ from .services import (
     run_cluster,
     run_full_pipeline,
     run_generate_drafts,
+    run_review_drafts,
     run_scrape,
 )
 
@@ -26,6 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
     enrich_parser.add_argument("--limit", type=int, default=20, help="最多处理多少条")
     draft_parser = subparsers.add_parser("generate-drafts", help="生成公众号初稿")
     draft_parser.add_argument("--limit", type=int, default=1, help="最多生成多少篇")
+    review_parser = subparsers.add_parser("review-drafts", help="让模型审核已生成初稿并写入文章评分")
+    review_parser.add_argument("--limit", type=int, default=10, help="最多评分多少篇未评分初稿")
     pipeline_parser = subparsers.add_parser("run-pipeline", help="执行 scrape -> cluster -> enrich -> generate")
     pipeline_parser.add_argument("--draft-limit", type=int, default=1, help="完整流程最后生成多少篇")
     web_parser = subparsers.add_parser("run-web", help="启动 Web 页面")
@@ -60,6 +63,10 @@ def main() -> int:
 
     if args.command == "generate-drafts":
         print(json.dumps(run_generate_drafts(settings, limit=args.limit), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "review-drafts":
+        print(json.dumps(run_review_drafts(settings, limit=args.limit), ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "run-pipeline":

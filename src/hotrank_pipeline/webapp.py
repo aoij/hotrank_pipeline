@@ -21,6 +21,7 @@ from .services import (
     run_cluster,
     run_full_pipeline,
     run_generate_drafts,
+    run_review_drafts,
     run_scrape,
 )
 
@@ -345,6 +346,27 @@ def action_draft(limit: int = Form(1)):
 
     started = _start_background_job("生成初稿", worker)
     message = "生成初稿已开始，正在后台处理，可直接看前方日志面板。" if started else "已有任务执行中，请先查看前方日志进度。"
+    return RedirectResponse(
+        url=f"/?message={quote(message)}",
+        status_code=303,
+    )
+
+
+@app.post("/actions/review-drafts")
+def action_review_drafts(limit: int = Form(10)):
+    def progress(level: str, message: str):
+        append_runtime_log(level, message)
+
+    def worker():
+        append_runtime_log("info", f"开始执行：模型审核文章评分，limit={limit}")
+        result = run_review_drafts(settings, limit=limit, progress_cb=progress)
+        append_runtime_log(
+            "warning" if result.get("failed_count") else "success",
+            f"文章评分完成：成功 {result['reviewed_count']} 篇，失败 {result.get('failed_count', 0)} 篇",
+        )
+
+    started = _start_background_job("模型审核评分", worker)
+    message = "模型审核评分已开始，完成后公众号编辑器列表会按文章分优先展示。" if started else "已有任务执行中，请先查看前方日志进度。"
     return RedirectResponse(
         url=f"/?message={quote(message)}",
         status_code=303,

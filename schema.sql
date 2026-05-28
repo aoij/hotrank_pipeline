@@ -180,8 +180,21 @@ create table if not exists article_drafts (
     content_md text not null,
     archive_path text not null,
     prompt_excerpt text,
+    review_score numeric(4,1),
+    review_summary text,
+    review_model text,
+    reviewed_at timestamptz,
     created_at timestamptz not null default now()
 );
 
+alter table article_drafts
+    add column if not exists review_score numeric(4,1),
+    add column if not exists review_summary text,
+    add column if not exists review_model text,
+    add column if not exists reviewed_at timestamptz;
+
 create index if not exists idx_article_drafts_cluster_id
     on article_drafts(cluster_id, created_at desc);
+
+create index if not exists idx_article_drafts_review_score_created_at
+    on article_drafts(review_score desc nulls last, created_at desc, id desc);

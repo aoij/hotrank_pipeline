@@ -51,7 +51,4 @@ def read_runtime_logs(limit: int = 120) -> list[dict[str, Any]]:
 def latest_notice(logs: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not logs:
         return None
-    for entry in reversed(logs):
-        if entry.get("level") in {"error", "warning"}:
-            return entry
     return logs[-1]

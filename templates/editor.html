@@ -165,6 +165,45 @@
       line-height: 1.7;
     }
 
+    .draft-topline {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .score-pill {
+      flex-shrink: 0;
+      padding: 5px 9px;
+      border-radius: 999px;
+      background: #ede9fe;
+      color: #6d28d9;
+      font-size: 12px;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .score-pill.unscored {
+      background: #f1f5f9;
+      color: #64748b;
+      border: 1px solid #e2e8f0;
+    }
+
+    .review-summary {
+      margin-top: 7px;
+      padding: 8px 10px;
+      border-radius: 12px;
+      background: #f8fafc;
+      color: #475569;
+      font-size: 12px;
+      line-height: 1.65;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
     .editor-grid {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -353,7 +392,7 @@
             {% if source_type == 'db' %}数据库稿件{% elif source_type == 'file' %}本地文件{% else %}空白新稿{% endif %}
           </span>
         </div>
-        <p class="panel-desc">支持从最近生成稿件中直接打开，也支持通过文件路径进入本地 Markdown 稿件并立刻渲染。</p>
+        <p class="panel-desc">支持从最近生成稿件中直接打开；列表按模型审核文章分优先展示，同分再看最新时间。</p>
         <div class="panel-body">
           <div class="source-box">
             <div><strong>当前标题：</strong>{{ editor_title }}</div>
@@ -370,17 +409,28 @@
           <div class="copy-tip" style="margin: 10px 0 0;">会删除当前稿件中的 Markdown 图片引用，并按当前生图配置重新生成插图；如果生图失败，会按配置回退原文取图。</div>
           {% endif %}
 
-          <div style="margin-top: 20px; font-size: 13px; color: var(--sub); font-weight: 700;">最近稿件</div>
+          <div style="margin-top: 20px; font-size: 13px; color: var(--sub); font-weight: 700;">最近稿件（高分优先）</div>
           <div class="draft-list">
             {% if drafts %}
               {% for draft in drafts %}
               <a class="draft-item" href="/editor?draft_id={{ draft.id }}">
-                <h3>{{ draft.title }}</h3>
+                <div class="draft-topline">
+                  <h3>{{ draft.title }}</h3>
+                  {% if draft.review_score is not none %}
+                  <span class="score-pill">{{ '%.1f'|format(draft.review_score) }} 分</span>
+                  {% else %}
+                  <span class="score-pill unscored">未评分</span>
+                  {% endif %}
+                </div>
                 <div class="meta">
                   <div>时间：{{ draft.created_at_text }}</div>
                   <div>模型：{{ draft.model_name }}</div>
+                  {% if draft.reviewed_at_text %}<div>评分时间：{{ draft.reviewed_at_text }}</div>{% endif %}
                   <div>归档：{{ draft.archive_path }}</div>
                 </div>
+                {% if draft.review_summary %}
+                <div class="review-summary">{{ draft.review_summary }}</div>
+                {% endif %}
               </a>
               {% endfor %}
             {% else %}

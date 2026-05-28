@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -499,6 +500,174 @@ def generate_wechat_draft(
         title = first_line.lstrip("#").strip() or title
 
     return title, content, prompt[:1200]
+
+
+def _extract_json_object(text: str) -> dict | None:
+    content = (text or "").strip()
+    if not content:
+        return None
+    content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.I)
+    content = re.sub(r"\s*```$", "", content)
+    try:
+        parsed = json.loads(content)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+
+    candidates: list[dict] = []
+    for match in re.finditer(r"\{[^{}]*\}", content):
+        try:
+            parsed = json.loads(match.group(0))
+            if isinstance(parsed, dict):
+                candidates.append(parsed)
+        except json.JSONDecodeError:
+            continue
+    if not candidates:
+        return None
+    score_keys = {"score", "review_score", "article_score", "分数", "评分"}
+    for candidate in reversed(candidates):
+        if score_keys.intersection(candidate.keys()):
+            return candidate
+    return candidates[-1]
+
+
+def _parse_review_score(text: str) -> float:
+    def normalize_score(value: object) -> float | None:
+        if isinstance(value, str):
+            match = re.search(r"\d+(?:\.\d+)?", value)
+            if not match:
+                return None
+            raw_score = float(match.group(0))
+        else:
+            raw_score = float(value)
+        if raw_score > 10 and raw_score <= 100:
+            raw_score = raw_score / 10
+        return max(0.0, min(10.0, round(raw_score, 1)))
+
+    data = _extract_json_object(text)
+    if data:
+        for key in ("score", "review_score", "article_score", "分数", "评分"):
+            if key in data:
+                try:
+                    score = normalize_score(data[key])
+                    if score is not None:
+                        return score
+                except (TypeError, ValueError):
+                    continue
+
+    score_patterns = (
+        r"\"?(?:score|review_score|article_score)\"?\s*[:：]\s*\"?(\d+(?:\.\d+)?)",
+        r"\"?(?:score|review_score|article_score)\"?\s*(?:设为|为|=)\s*\"?(\d+(?:\.\d+)?)",
+        r"\"?(?:分数|评分|文章分)\"?\s*[:：]?\s*\"?(\d+(?:\.\d+)?)",
+        r"(\d+(?:\.\d+)?)\s*/\s*10",
+    )
+    for pattern in score_patterns:
+        match = re.search(pattern, text or "", flags=re.I)
+        if match:
+            value = float(match.group(1))
+            if value > 10 and value <= 100:
+                value = value / 10
+            return max(0.0, min(10.0, round(value, 1)))
+
+    raise ValueError("模型评分响应中未解析到 0-10 分数")
+
+
+def _parse_review_summary(text: str) -> str:
+    data = _extract_json_object(text)
+    if data:
+        for key in ("summary", "reason", "review_summary", "点评", "理由", "建议"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return re.sub(r"\s+", " ", value).strip()[:220]
+        strengths = data.get("strengths")
+        weaknesses = data.get("weaknesses")
+        if isinstance(strengths, list) or isinstance(weaknesses, list):
+            parts = []
+            if strengths:
+                parts.append("优点：" + "；".join(str(x) for x in strengths[:3]))
+            if weaknesses:
+                parts.append("待优化：" + "；".join(str(x) for x in weaknesses[:3]))
+            if parts:
+                return " ".join(parts)[:220]
+
+    cleaned = re.sub(r"^```(?:json)?\s*", "", text or "", flags=re.I)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    for match in re.finditer(r'"summary"\s*:\s*"([^"]{6,260})', cleaned, flags=re.I):
+        value = match.group(1).strip()
+        if value:
+            return re.sub(r"\s+", " ", value).strip()[:220]
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if "扣分项" in cleaned or "评分标准" in cleaned or len(cleaned) > 260:
+        return "模型已完成审核评分；建议人工复核标题、结构、事实边界和手机端阅读节奏。"
+    return cleaned[:220] or "模型已完成审核，但未返回明确点评。"
+
+
+def review_wechat_draft(
+    llm_config: dict,
+    title: str,
+    content_md: str,
+) -> tuple[float, str, str]:
+    plain_content = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", content_md or "")
+    plain_content = re.sub(r"\n{3,}", "\n\n", plain_content).strip()
+    prompt = f"""你是一名严格但务实的微信公众号主编，请审核下面这篇已经生成的公众号初稿，并给出可用于排序的文章质量分。
+
+评分范围：0-10 分，保留 1 位小数。
+
+请按公众号发布前审核标准评分，重点看：
+1. 标题是否清晰、有打开欲，但不标题党。
+2. 开头是否能抓住读者，并快速交代价值。
+3. 结构是否自然，不像固定模板或 AI 摘要。
+4. 信息密度、事实边界、观点分层是否合格。
+5. 段落节奏是否适合手机端阅读。
+6. 是否具备发布可用度：越接近可直接发，分数越高。
+
+扣分项：
+- 明显空泛、模板化、复述材料、像新闻播报。
+- 编造事实、过度煽动、事实与观点混在一起。
+- 段落太长、标题生硬、结尾套路。
+- 与微信公众号读者场景不匹配。
+
+只输出 JSON，不要输出 Markdown，不要解释 JSON 之外的内容：
+{{
+  "score": 8.4,
+  "summary": "一句话说明为什么给这个分数，并指出最需要优化的一点"
+}}
+
+文章标题：{title}
+
+文章正文：
+{plain_content[:6000]}
+"""
+    payload = {
+        "model": llm_config["model"],
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是中文微信公众号主编，负责审核文章质量并给出稳定、可比较的评分。",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 1200,
+    }
+
+    response = _post_json_with_retry(
+        f"{llm_config['base_url'].rstrip('/')}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {llm_config['api_key']}",
+            "Content-Type": "application/json",
+        },
+        payload=payload,
+        timeout=int(llm_config.get("timeout_seconds", 180)),
+        retry_count=int(llm_config.get("retry_count", 3)),
+        backoff_seconds=float(llm_config.get("retry_backoff_seconds", 2.0)),
+    )
+    data = response.json()
+    message = data["choices"][0]["message"]
+    raw = (message.get("content") or message.get("reasoning_content") or "").strip()
+    score = _parse_review_score(raw)
+    summary = _parse_review_summary(raw)
+    return score, summary, prompt[:1200]
 
 
 def _download_images(image_urls: list[str], month_dir: Path, stem_name: str) -> list[str]:

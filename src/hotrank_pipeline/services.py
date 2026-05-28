@@ -10,15 +10,17 @@ from .db import (
     fetch_latest_whitelisted_items,
     fetch_recent_clusters,
     fetch_stats,
+    fetch_unreviewed_drafts,
     fetch_unfetched_cluster_items,
     init_db,
     persist_article_fetch_result,
     persist_cluster_run,
     persist_scrape_result,
     persist_draft_record,
+    update_draft_review,
 )
 from .fetchers import fetch_article
-from .llm import archive_draft, generate_wechat_draft
+from .llm import archive_draft, generate_wechat_draft, review_wechat_draft
 from .tophub import scrape_tophub_news
 
 
@@ -341,6 +343,33 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
                 archive_path=archive_path,
                 prompt_excerpt=prompt_excerpt,
             )
+            review_score = None
+            review_summary = ""
+            try:
+                _emit(progress_cb, "info", f"[成稿 {idx}/{total}] 开始模型审核评分：draft_id={draft_id}")
+                review_score, review_summary, _ = review_wechat_draft(
+                    llm_config=llm_config,
+                    title=title,
+                    content_md=content_md,
+                )
+                update_draft_review(
+                    settings=settings,
+                    draft_id=draft_id,
+                    review_score=review_score,
+                    review_summary=review_summary,
+                    review_model=llm_config["model"],
+                )
+                _emit(
+                    progress_cb,
+                    "success",
+                    f"[成稿 {idx}/{total}] 模型审核完成：文章分 {review_score:.1f}｜{review_summary[:80]}",
+                )
+            except Exception as review_exc:
+                _emit(
+                    progress_cb,
+                    "warning",
+                    f"[成稿 {idx}/{total}] 初稿已生成，但模型审核评分失败：draft_id={draft_id}｜{review_exc}",
+                )
             generated.append(
                 {
                     "draft_id": draft_id,
@@ -350,12 +379,14 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
                     "image_count": downloaded_images,
                     "image_candidate_count": len(image_urls),
                     "image_source": image_source,
+                    "review_score": review_score,
+                    "review_summary": review_summary,
                 }
             )
             _emit(
                 progress_cb,
                 "success",
-                f"[成稿 {idx}/{total}] 生成完成：draft_id={draft_id}｜{title}",
+                f"[成稿 {idx}/{total}] 生成完成：draft_id={draft_id}｜文章分={review_score if review_score is not None else '未评分'}｜{title}",
             )
         except Exception as exc:
             failed.append(
@@ -381,6 +412,58 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
     }
     finish_level = "success" if not failed else "warning"
     _emit(progress_cb, finish_level, f"公众号初稿生成完成：generated={len(generated)} failed={len(failed)}")
+    return payload
+
+
+def run_review_drafts(settings: Settings, limit: int = 10, progress_cb: ProgressCallback | None = None) -> dict:
+    runtime_config = load_runtime_config(settings)
+    llm_config = runtime_config.get("llm", {})
+    if not llm_config.get("api_key"):
+        raise RuntimeError("local_settings.json 未配置 llm.api_key")
+
+    drafts = fetch_unreviewed_drafts(settings, limit=max(1, limit))
+    total = len(drafts)
+    reviewed = []
+    failed = []
+    _emit(progress_cb, "info", f"待模型审核评分初稿：{total} 篇｜模型={llm_config.get('model', '')}")
+
+    for idx, draft in enumerate(drafts, start=1):
+        title = draft.get("title") or draft.get("canonical_title") or f"draft-{draft['id']}"
+        _emit(progress_cb, "info", f"[评分 {idx}/{total}] 开始审核：draft_id={draft['id']}｜{title[:60]}")
+        try:
+            score, summary, _ = review_wechat_draft(
+                llm_config=llm_config,
+                title=title,
+                content_md=draft.get("content_md") or "",
+            )
+            update_draft_review(
+                settings=settings,
+                draft_id=draft["id"],
+                review_score=score,
+                review_summary=summary,
+                review_model=llm_config["model"],
+            )
+            reviewed.append(
+                {
+                    "draft_id": draft["id"],
+                    "title": title,
+                    "review_score": score,
+                    "review_summary": summary,
+                }
+            )
+            _emit(progress_cb, "success", f"[评分 {idx}/{total}] 完成：文章分 {score:.1f}｜{summary[:90]}")
+        except Exception as exc:
+            failed.append({"draft_id": draft["id"], "title": title, "error": str(exc)})
+            _emit(progress_cb, "error", f"[评分 {idx}/{total}] 失败：draft_id={draft['id']}｜{exc}")
+
+    payload = {
+        "reviewed_count": len(reviewed),
+        "failed_count": len(failed),
+        "reviewed": reviewed,
+        "failed": failed,
+    }
+    level = "success" if not failed else "warning"
+    _emit(progress_cb, level, f"模型审核评分完成：reviewed={len(reviewed)} failed={len(failed)}")
     return payload
 
 
