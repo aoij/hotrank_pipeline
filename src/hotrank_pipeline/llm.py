@@ -195,19 +195,19 @@ def archive_draft(
     image_urls: list[str] | None = None,
 ) -> tuple[str, int]:
     now = datetime.now()
-    year_dir = Path(output_dir) / now.strftime("%Y")
-    month_dir = year_dir / now.strftime("%Y-%m")
-    month_dir.mkdir(parents=True, exist_ok=True)
+    month_dir = Path(output_dir) / now.strftime("%Y-%m")
+    day_dir = month_dir / now.strftime("%Y-%m-%d")
+    day_dir.mkdir(parents=True, exist_ok=True)
     safe_title = sanitize_filename(title)
     filename = f"{now.strftime('%Y%m%d_%H%M%S')}_{safe_title}.md"
-    target = month_dir / filename
+    target = day_dir / filename
     stem_name = target.stem
-    image_paths = _download_images(image_urls or [], month_dir, stem_name)
+    image_paths = _download_images(image_urls or [], day_dir, stem_name)
     final_content = _inject_images_into_markdown(content_md, image_paths)
     try:
         target.write_text(final_content, encoding="utf-8")
     except PermissionError:
-        fallback = month_dir / f"{now.strftime('%Y%m%d_%H%M%S')}_{safe_title[:32]}_{now.strftime('%f')}.md"
+        fallback = day_dir / f"{now.strftime('%Y%m%d_%H%M%S')}_{safe_title[:32]}_{now.strftime('%f')}.md"
         fallback.write_text(final_content, encoding="utf-8")
         target = fallback
     return str(target), len(image_paths)

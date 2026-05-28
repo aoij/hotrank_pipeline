@@ -3,6 +3,7 @@ from __future__ import annotations
 from .clustering import build_clusters
 from .config import Settings, load_runtime_config
 from .db import (
+    count_recent_clusters,
     fetch_cluster_sources_for_generation,
     fetch_latest_whitelisted_items,
     fetch_recent_clusters,
@@ -200,8 +201,51 @@ def run_full_pipeline(settings: Settings, draft_limit: int = 1) -> dict:
     }
 
 
-def dashboard_payload(settings: Settings) -> dict:
+def _group_clusters_by_date(clusters: list[dict]) -> list[dict]:
+    groups: list[dict] = []
+    current_group: dict | None = None
+
+    for cluster in clusters:
+        created_date = cluster.get("created_date") or "未知日期"
+        if current_group is None or current_group["created_date"] != created_date:
+            current_group = {
+                "created_date": created_date,
+                "count": 0,
+                "clusters": [],
+            }
+            groups.append(current_group)
+        current_group["clusters"].append(cluster)
+        current_group["count"] += 1
+
+    return groups
+
+
+def dashboard_payload(settings: Settings, cluster_page: int = 1, cluster_page_size: int = 12) -> dict:
+    page_size = max(1, min(cluster_page_size, 50))
+    total = count_recent_clusters(settings)
+    total_pages = max(1, (total + page_size - 1) // page_size) if total else 1
+    page = max(1, min(cluster_page, total_pages))
+    offset = (page - 1) * page_size
+    clusters = fetch_recent_clusters(settings, limit=page_size, offset=offset)
+    page_numbers = list(range(max(1, page - 2), min(total_pages, page + 2) + 1))
+    start_index = offset + 1 if total else 0
+    end_index = min(offset + len(clusters), total) if total else 0
+
     return {
         "stats": fetch_stats(settings),
-        "clusters": fetch_recent_clusters(settings, limit=12),
+        "clusters": clusters,
+        "cluster_groups": _group_clusters_by_date(clusters),
+        "cluster_pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+            "has_prev": page > 1,
+            "has_next": page < total_pages,
+            "prev_page": page - 1 if page > 1 else 1,
+            "next_page": page + 1 if page < total_pages else total_pages,
+            "page_numbers": page_numbers,
+            "start_index": start_index,
+            "end_index": end_index,
+        },
     }

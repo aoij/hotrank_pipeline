@@ -238,7 +238,15 @@ def persist_cluster_run(settings: Settings, whitelist_boards: list[str], cluster
         return cluster_run_id
 
 
-def fetch_recent_clusters(settings: Settings, limit: int = 12) -> list[dict]:
+def count_recent_clusters(settings: Settings) -> int:
+    with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("select count(*) from topic_clusters")
+            row = cur.fetchone() or {}
+            return int(row.get("count", 0))
+
+
+def fetch_recent_clusters(settings: Settings, limit: int = 12, offset: int = 0) -> list[dict]:
     with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -250,13 +258,15 @@ def fetch_recent_clusters(settings: Settings, limit: int = 12) -> list[dict]:
                     tc.signal_score,
                     tc.item_count,
                     tc.created_at,
-                    cr.id as cluster_run_id
+                    cr.id as cluster_run_id,
+                    to_char(tc.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD') as created_date,
+                    to_char(tc.created_at at time zone 'Asia/Shanghai', 'HH24:MI:SS') as created_time
                 from topic_clusters tc
                 join cluster_runs cr on cr.id = tc.cluster_run_id
-                order by tc.created_at desc, tc.signal_score desc
-                limit %s
+                order by tc.created_at desc, tc.id desc
+                limit %s offset %s
                 """,
-                (limit,),
+                (limit, offset),
             )
             return list(cur.fetchall())
 

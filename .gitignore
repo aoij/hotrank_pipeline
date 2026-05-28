@@ -4,4 +4,6 @@ __pycache__/
 .venv/
 local_settings.json
 data/raw/*.html
+data/runtime_logs/
+data/dingtalk_*.md
 *.log
