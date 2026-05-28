@@ -1061,7 +1061,7 @@
           <span class="chip chip-primary">当前模型：<strong>{{ runtime.llm.model }}</strong></span>
           <span class="chip">白名单榜单：<strong>{{ runtime.board_whitelist | length }}</strong> 个</span>
           <span class="chip">聚类分页：<strong>第 {{ cluster_pagination.page }} / {{ cluster_pagination.total_pages }} 页</strong></span>
-          <span class="chip chip-accent">插图策略：<strong>{{ runtime.images.max_per_draft if runtime.images else 6 }}</strong> 张 / 篇</span>
+          <span class="chip chip-accent">插图策略：<strong>{% if runtime.images and runtime.images.prefer_ai_generated %}AI生图优先{% else %}原文取图{% endif %}</strong> · {{ runtime.images.max_per_draft if runtime.images else 6 }} 张 / 篇</span>
         </div>
       </div>
       <aside class="hero-aside">
@@ -1388,11 +1388,46 @@
               <label>榜单白名单（逗号分隔）</label>
               <textarea name="board_whitelist">{{ runtime.board_whitelist | join(', ') }}</textarea>
 
+              <label>
+                <input type="checkbox" name="content_filter_exclude_newslike" {% if runtime.content_filter is not defined or runtime.content_filter.exclude_newslike %}checked{% endif %} style="width:auto; margin-right:8px;">
+                过滤新闻快讯 / 通报公告类选题
+              </label>
+              <div class="form-tip">开启后，补抓和成稿阶段会跳过偏新闻播报、官方通报、政策公告、硬新闻快讯类内容，优先保留适合公众号二创解读的选题。</div>
+
               <label>每篇稿件最多插图数</label>
               <input type="number" min="1" max="12" name="image_max_per_draft" value="{{ runtime.images.max_per_draft if runtime.images else 6 }}">
 
               <label>单个来源最多取图数</label>
               <input type="number" min="1" max="8" name="image_max_per_source" value="{{ runtime.images.max_per_source if runtime.images else 4 }}">
+
+              <label>
+                <input type="checkbox" name="image_prefer_ai_generated" {% if runtime.images is not defined or runtime.images.prefer_ai_generated %}checked{% endif %} style="width:auto; margin-right:8px;">
+                优先使用 AI 生图
+              </label>
+
+              <label>
+                <input type="checkbox" name="image_fallback_to_source" {% if runtime.images is not defined or runtime.images.fallback_to_source is not defined or runtime.images.fallback_to_source %}checked{% endif %} style="width:auto; margin-right:8px;">
+                生图失败后回退原文取图
+              </label>
+
+              <label>生图 API 地址</label>
+              <input name="image_generation_base_url" value="{{ runtime.images.generation.base_url if runtime.images and runtime.images.generation else '' }}" placeholder="例如：https://xxx/v1 或 https://xxx/v1/images/generations">
+
+              <label>生图模型</label>
+              <input name="image_generation_model" value="{{ runtime.images.generation.model if runtime.images and runtime.images.generation else '' }}" placeholder="例如：gpt-image-1 / flux / 即梦模型名">
+
+              <label>生图 API Key（留空则保持当前值）</label>
+              <input name="image_generation_api_key" placeholder="当前：{{ masked_image_api_key }}">
+
+              <label>生图尺寸</label>
+              <input name="image_generation_size" value="{{ runtime.images.generation.size if runtime.images and runtime.images.generation and runtime.images.generation.size else '1024x1024' }}">
+
+              <label>生图 Prompt 模板（可配置）</label>
+              <textarea class="prompt-textarea" name="image_generation_prompt_template" placeholder="留空使用系统内置插图 Prompt。可用变量：{article_title}、{section_title}、{section_excerpt}、{image_index}、{image_count}">{{ runtime.images.generation.prompt_template if runtime.images and runtime.images.generation else '' }}</textarea>
+              <div class="prompt-help">
+                每张图会根据文章标题与小节内容自动生成提示词。支持变量：
+                <code>{article_title}</code>、<code>{section_title}</code>、<code>{section_excerpt}</code>、<code>{image_index}</code>、<code>{image_count}</code>。
+              </div>
 
               <div style="margin-top: 16px;">
                 <button type="submit" class="full-button">保存当前配置</button>

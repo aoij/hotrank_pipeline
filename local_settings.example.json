@@ -24,7 +24,20 @@
   },
   "images": {
     "max_per_draft": 6,
-    "max_per_source": 4
+    "max_per_source": 4,
+    "prefer_ai_generated": true,
+    "fallback_to_source": true,
+    "generation": {
+      "base_url": "",
+      "api_key": "",
+      "model": "",
+      "size": "1024x1024",
+      "timeout_seconds": 180,
+      "prompt_template": ""
+    }
+  },
+  "content_filter": {
+    "exclude_newslike": true
   },
   "llm": {
     "base_url": "https://token-plan-cn.xiaomimimo.com/v1",

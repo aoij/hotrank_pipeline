@@ -202,6 +202,9 @@ def index(request: Request, message: str | None = None, cluster_page: int = 1):
             "message": message,
             "runtime": runtime,
             "masked_api_key": mask_secret(runtime.get("llm", {}).get("api_key", "")),
+            "masked_image_api_key": mask_secret(
+                runtime.get("images", {}).get("generation", {}).get("api_key", "")
+            ),
             "runtime_logs": logs,
             "runtime_notice": notice,
             "recent_drafts": recent_drafts,
@@ -216,6 +219,14 @@ def update_config(
     llm_model: str = Form(...),
     llm_api_key: str = Form(""),
     llm_draft_prompt: str = Form(""),
+    image_generation_base_url: str = Form(""),
+    image_generation_model: str = Form(""),
+    image_generation_api_key: str = Form(""),
+    image_generation_size: str = Form("1024x1024"),
+    image_generation_prompt_template: str = Form(""),
+    image_prefer_ai_generated: str = Form(""),
+    image_fallback_to_source: str = Form(""),
+    content_filter_exclude_newslike: str = Form(""),
     draft_output_dir: str = Form(...),
     board_whitelist: str = Form(...),
     image_max_per_draft: int = Form(6),
@@ -233,8 +244,28 @@ def update_config(
     runtime.setdefault("images", {})
     runtime["images"]["max_per_draft"] = max(1, image_max_per_draft)
     runtime["images"]["max_per_source"] = max(1, image_max_per_source)
+    runtime["images"]["prefer_ai_generated"] = image_prefer_ai_generated == "on"
+    runtime["images"]["fallback_to_source"] = image_fallback_to_source == "on"
+    runtime["images"].setdefault("generation", {})
+    runtime["images"]["generation"]["base_url"] = image_generation_base_url.strip()
+    runtime["images"]["generation"]["model"] = image_generation_model.strip()
+    if image_generation_api_key.strip():
+        runtime["images"]["generation"]["api_key"] = image_generation_api_key.strip()
+    elif "api_key" not in runtime["images"]["generation"]:
+        runtime["images"]["generation"]["api_key"] = ""
+    runtime["images"]["generation"]["size"] = image_generation_size.strip() or "1024x1024"
+    runtime["images"]["generation"]["prompt_template"] = image_generation_prompt_template.strip()
+    runtime.setdefault("content_filter", {})
+    runtime["content_filter"]["exclude_newslike"] = content_filter_exclude_newslike == "on"
     save_runtime_config(settings, runtime)
-    append_runtime_log("success", f"配置已保存：模型={runtime['llm']['model']}，单篇插图上限={runtime['images']['max_per_draft']}")
+    append_runtime_log(
+        "success",
+        (
+            f"配置已保存：模型={runtime['llm']['model']}，"
+            f"配图={'AI优先' if runtime['images']['prefer_ai_generated'] else '原文取图'}，"
+            f"单篇插图上限={runtime['images']['max_per_draft']}"
+        ),
+    )
     return RedirectResponse(url="/?message=配置已保存", status_code=303)
 
 

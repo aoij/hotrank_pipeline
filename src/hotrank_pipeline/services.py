@@ -25,9 +25,74 @@ from .tophub import scrape_tophub_news
 ProgressCallback = Callable[[str, str], None]
 
 
+NEWSLIKE_KEYWORDS = (
+    "通报",
+    "公告",
+    "发布会",
+    "新华社",
+    "央视新闻",
+    "新闻联播",
+    "快讯",
+    "突发",
+    "据报道",
+    "据悉",
+    "回应称",
+    "官方回应",
+    "警方",
+    "法院",
+    "检方",
+    "判决",
+    "调查组",
+    "监管",
+    "处罚",
+    "政策",
+    "条例",
+    "会议",
+    "声明",
+)
+
+NEWSLIKE_HARD_KEYWORDS = (
+    "新华社",
+    "央视新闻",
+    "新闻联播",
+    "发布会",
+    "官方通报",
+    "警方通报",
+    "情况通报",
+    "快讯",
+)
+
+
 def _emit(progress_cb: ProgressCallback | None, level: str, message: str) -> None:
     if progress_cb:
         progress_cb(level, message)
+
+
+def _is_newslike_text(title: str, summary: str = "", content: str = "") -> bool:
+    text = f"{title or ''} {summary or ''} {(content or '')[:800]}"
+    if any(keyword in text for keyword in NEWSLIKE_HARD_KEYWORDS):
+        return True
+    score = sum(1 for keyword in NEWSLIKE_KEYWORDS if keyword in text)
+    return score >= 2
+
+
+def _filter_newslike_clusters(clusters: list[dict], progress_cb: ProgressCallback | None = None) -> tuple[list[dict], int]:
+    filtered: list[dict] = []
+    skipped = 0
+    for cluster in clusters:
+        title = cluster.get("canonical_title") or ""
+        summary = cluster.get("cluster_summary") or ""
+        sources = cluster.get("sources") or []
+        source_text = " ".join(
+            f"{source.get('title') or source.get('member_title') or ''} {source.get('summary') or ''}"
+            for source in sources[:4]
+        )
+        if _is_newslike_text(title, summary, source_text):
+            skipped += 1
+            _emit(progress_cb, "info", f"跳过新闻类选题：{title[:60]}")
+            continue
+        filtered.append(cluster)
+    return filtered, skipped
 
 
 def _board_image_priority(board_name: str) -> int:
@@ -127,11 +192,21 @@ def run_cluster(settings: Settings, progress_cb: ProgressCallback | None = None)
 
 
 def run_article_enrichment(settings: Settings, limit: int = 20, progress_cb: ProgressCallback | None = None) -> dict:
+    runtime_config = load_runtime_config(settings)
+    content_filter_config = runtime_config.get("content_filter", {})
+    filter_newslike = bool(content_filter_config.get("exclude_newslike", True))
     pending_items = fetch_unfetched_cluster_items(settings, limit=limit)
+    if filter_newslike:
+        before_count = len(pending_items)
+        pending_items = [item for item in pending_items if not _is_newslike_text(item.get("title") or "")]
+        skipped_by_title = before_count - len(pending_items)
+        if skipped_by_title:
+            _emit(progress_cb, "info", f"已过滤新闻类待补抓条目：{skipped_by_title} 条")
     processed = 0
     fetched = 0
     blocked = 0
     errored = 0
+    skipped = 0
     total = len(pending_items)
 
     _emit(progress_cb, "info", f"正文补抓待处理：{total} 条")
@@ -150,6 +225,13 @@ def run_article_enrichment(settings: Settings, limit: int = 20, progress_cb: Pro
         )
         persist_article_fetch_result(settings, result)
         processed += 1
+        if filter_newslike and _is_newslike_text(result.title or item["title"], result.summary, result.content_text):
+            skipped += 1
+            _emit(
+                progress_cb,
+                "info",
+                f"[补抓 {idx}/{total}] 已识别为新闻类内容，后续成稿会跳过：{(result.title or item['title'])[:50]}",
+            )
         if result.fetch_status == "fetched":
             fetched += 1
             _emit(
@@ -177,13 +259,14 @@ def run_article_enrichment(settings: Settings, limit: int = 20, progress_cb: Pro
         "fetched": fetched,
         "blocked": blocked,
         "errored": errored,
+        "skipped_newslike": skipped,
     }
     _emit(
         progress_cb,
         "success" if not blocked and not errored else "warning",
         (
             f"正文补抓完成：processed={processed} fetched={fetched} "
-            f"blocked={blocked} errored={errored}"
+            f"blocked={blocked} errored={errored} skipped_newslike={skipped}"
         ),
     )
     return payload
@@ -196,18 +279,36 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
     if not llm_config.get("api_key"):
         raise RuntimeError("local_settings.json 未配置 llm.api_key")
 
-    clusters = fetch_cluster_sources_for_generation(settings, limit=limit)
+    fetch_limit = max(limit * 4, limit)
+    clusters = fetch_cluster_sources_for_generation(settings, limit=fetch_limit)
+    if runtime_config.get("content_filter", {}).get("exclude_newslike", True):
+        clusters, skipped_newslike = _filter_newslike_clusters(clusters, progress_cb=progress_cb)
+    else:
+        skipped_newslike = 0
+    clusters = clusters[:limit]
     generated = []
     total = len(clusters)
 
-    _emit(progress_cb, "info", f"待生成稿件：{total} 篇｜模型={llm_config.get('model', '')}")
+    image_generation = image_config.get("generation") or {}
+    image_mode = "AI生图优先" if image_config.get("prefer_ai_generated", True) else "原文取图"
+    _emit(
+        progress_cb,
+        "info",
+        (
+            f"待生成稿件：{total} 篇｜模型={llm_config.get('model', '')}｜"
+            f"配图模式={image_mode}｜新闻类跳过={skipped_newslike}"
+        ),
+    )
 
     for idx, cluster in enumerate(clusters, start=1):
         image_urls = _collect_draft_images(cluster, image_config)
         _emit(
             progress_cb,
             "info",
-            f"[成稿 {idx}/{total}] 开始生成：{cluster['canonical_title']}｜候选配图 {len(image_urls)} 张",
+            (
+                f"[成稿 {idx}/{total}] 开始生成：{cluster['canonical_title']}｜"
+                f"AI生图模型={image_generation.get('model') or '未配置'}｜回退候选图 {len(image_urls)} 张"
+            ),
         )
 
         title, content_md, prompt_excerpt = generate_wechat_draft(
@@ -216,16 +317,17 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
             article_sources=cluster["sources"],
         )
         _emit(progress_cb, "info", f"[成稿 {idx}/{total}] 模型返回完成：{title}")
-        archive_path, downloaded_images = archive_draft(
+        archive_path, downloaded_images, image_source = archive_draft(
             runtime_config["draft_output_dir"],
             title,
             content_md,
             image_urls=image_urls,
+            image_config=image_config,
         )
         _emit(
             progress_cb,
             "info",
-            f"[成稿 {idx}/{total}] 已归档：{archive_path}｜下载配图 {downloaded_images} 张",
+            f"[成稿 {idx}/{total}] 已归档：{archive_path}｜配图 {downloaded_images} 张｜来源={image_source}",
         )
         draft_id = persist_draft_record(
             settings=settings,
@@ -245,6 +347,7 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
                 "archive_path": archive_path,
                 "image_count": downloaded_images,
                 "image_candidate_count": len(image_urls),
+                "image_source": image_source,
             }
         )
         _emit(
@@ -255,6 +358,7 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
 
     payload = {
         "generated_count": len(generated),
+        "skipped_newslike": skipped_newslike,
         "drafts": generated,
     }
     _emit(progress_cb, "success", f"公众号初稿生成完成：generated={len(generated)}")

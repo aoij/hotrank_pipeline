@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import re
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +46,69 @@ def _guess_extension(content_type: str, url: str, body: bytes) -> str:
     if body[:4] == b"RIFF" and body[8:12] == b"WEBP":
         return ".webp"
     return ".jpg"
+
+
+def _image_generation_endpoint(base_url: str) -> str:
+    endpoint = (base_url or "").rstrip("/")
+    if not endpoint:
+        return ""
+    if endpoint.endswith("/images/generations"):
+        return endpoint
+    return f"{endpoint}/images/generations"
+
+
+def _decode_data_url(value: str) -> tuple[bytes, str]:
+    header, encoded = value.split(",", 1)
+    content_type = "image/png"
+    match = re.match(r"data:([^;]+);base64", header, re.I)
+    if match:
+        content_type = match.group(1).lower()
+    return base64.b64decode(encoded), content_type
+
+
+def _extract_image_payloads(data: object) -> list[object]:
+    if isinstance(data, dict):
+        for key in ("data", "images", "output", "result"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+        return [data]
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def _image_bytes_from_payload(payload: object, timeout_seconds: int = 180) -> tuple[bytes, str] | None:
+    value: str | None = None
+    if isinstance(payload, dict):
+        for key in ("b64_json", "base64", "image_base64", "data"):
+            candidate = payload.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                value = candidate.strip()
+                break
+        if value is None:
+            for key in ("url", "image_url", "uri"):
+                candidate = payload.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    value = candidate.strip()
+                    break
+    elif isinstance(payload, str) and payload.strip():
+        value = payload.strip()
+
+    if not value:
+        return None
+
+    if value.startswith("data:image/"):
+        return _decode_data_url(value)
+
+    if re.match(r"^https?://", value, re.I):
+        response = requests.get(value, timeout=timeout_seconds)
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+        return response.content, content_type or "image/jpeg"
+
+    raw = base64.b64decode(value)
+    return raw, "image/png"
 
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
@@ -178,6 +242,79 @@ def _render_prompt_template(template: str, context: dict[str, str]) -> str:
         for key, value in context.items():
             rendered = rendered.replace("{" + key + "}", value)
         return rendered
+
+
+def _markdown_sections(content_md: str) -> list[dict[str, str]]:
+    sections: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    buffer: list[str] = []
+
+    def flush() -> None:
+        nonlocal current, buffer
+        if current is not None:
+            current["excerpt"] = re.sub(r"\s+", " ", "\n".join(buffer)).strip()[:420]
+            sections.append(current)
+        buffer = []
+
+    for line in content_md.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            flush()
+            current = {"title": stripped.lstrip("#").strip(), "excerpt": ""}
+            continue
+        if stripped and current is not None and not stripped.startswith(("#", "!", "|")):
+            buffer.append(stripped)
+
+    flush()
+    return sections
+
+
+def _build_image_prompts(
+    title: str,
+    content_md: str,
+    image_config: dict,
+) -> list[str]:
+    max_count = max(0, int(image_config.get("max_per_draft", 4)))
+    if max_count <= 0:
+        return []
+
+    generation_config = image_config.get("generation") or {}
+    prompt_template = (generation_config.get("prompt_template") or "").strip()
+    sections = _markdown_sections(content_md)
+    if not sections:
+        plain = re.sub(r"[#>*_`!\[\]\(\)]", "", content_md)
+        sections = [{"title": title, "excerpt": re.sub(r"\s+", " ", plain).strip()[:420]}]
+
+    prompts: list[str] = []
+    for idx in range(max_count):
+        if idx == 0:
+            section = {"title": "封面主视觉", "excerpt": sections[0].get("excerpt", "")}
+        else:
+            section = sections[min(idx - 1, len(sections) - 1)]
+
+        context = {
+            "article_title": title,
+            "section_title": section.get("title") or title,
+            "section_excerpt": section.get("excerpt") or "",
+            "image_index": str(idx + 1),
+            "image_count": str(max_count),
+        }
+        if prompt_template:
+            prompt = _render_prompt_template(prompt_template, context)
+        else:
+            prompt = (
+                "为一篇中文微信公众号文章生成原创插图。"
+                f"文章标题：{context['article_title']}。"
+                f"插图位置：第 {context['image_index']} 张 / 共 {context['image_count']} 张。"
+                f"小节主题：{context['section_title']}。"
+                f"内容摘要：{context['section_excerpt']}。"
+                "画面要求：现代中文媒体插画风，真实但不过度新闻摄影感，构图干净，有情绪和信息量，"
+                "适合手机端公众号阅读；不要出现任何文字、标题、logo、水印、二维码、品牌商标；"
+                "不要直接生成真实公众人物脸部特写，避免血腥、事故现场和惊悚画面。"
+            )
+        prompts.append(prompt)
+
+    return prompts
 
 
 def _soften_generic_headings(content_md: str, plan: dict) -> str:
@@ -343,6 +480,74 @@ def _download_images(image_urls: list[str], month_dir: Path, stem_name: str) -> 
     return saved_paths
 
 
+def _generate_ai_images(
+    title: str,
+    content_md: str,
+    image_config: dict,
+    day_dir: Path,
+    stem_name: str,
+) -> tuple[list[str], list[str]]:
+    generation_config = image_config.get("generation") or {}
+    base_url = (generation_config.get("base_url") or "").strip()
+    model = (generation_config.get("model") or "").strip()
+    endpoint = _image_generation_endpoint(base_url)
+    if not endpoint or not model:
+        return [], []
+
+    prompts = _build_image_prompts(title, content_md, image_config)
+    if not prompts:
+        return [], []
+
+    asset_dir = day_dir / "assets" / stem_name
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    timeout_seconds = int(generation_config.get("timeout_seconds", 180))
+    size = (generation_config.get("size") or "1024x1024").strip()
+    api_key = (generation_config.get("api_key") or "").strip()
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    saved_paths: list[str] = []
+    used_prompts: list[str] = []
+    for idx, prompt in enumerate(prompts, start=1):
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "n": 1,
+            "size": size,
+        }
+        try:
+            response = requests.post(endpoint, headers=headers, json=payload, timeout=timeout_seconds)
+            response.raise_for_status()
+            data = response.json()
+            image_payloads = _extract_image_payloads(data)
+            image_data: tuple[bytes, str] | None = None
+            for image_payload in image_payloads:
+                image_data = _image_bytes_from_payload(image_payload, timeout_seconds=timeout_seconds)
+                if image_data:
+                    break
+            if not image_data:
+                continue
+            body, content_type = image_data
+            ext = _guess_extension(content_type, "", body)
+            target = asset_dir / f"ai_img_{idx:02d}{ext}"
+            target.write_bytes(body)
+            relative = Path("assets") / stem_name / target.name
+            saved_paths.append(relative.as_posix())
+            used_prompts.append(prompt)
+        except Exception:
+            continue
+
+    if used_prompts:
+        prompt_file = asset_dir / "ai_image_prompts.txt"
+        prompt_file.write_text(
+            "\n\n".join(f"--- image {idx} ---\n{prompt}" for idx, prompt in enumerate(used_prompts, start=1)),
+            encoding="utf-8",
+        )
+
+    return saved_paths, used_prompts
+
+
 def _inject_images_into_markdown(content_md: str, image_paths: list[str]) -> str:
     if not image_paths:
         return content_md
@@ -398,7 +603,8 @@ def archive_draft(
     title: str,
     content_md: str,
     image_urls: list[str] | None = None,
-) -> tuple[str, int]:
+    image_config: dict | None = None,
+) -> tuple[str, int, str]:
     now = datetime.now()
     month_dir = Path(output_dir) / now.strftime("%Y-%m")
     day_dir = month_dir / now.strftime("%Y-%m-%d")
@@ -407,7 +613,22 @@ def archive_draft(
     filename = f"{now.strftime('%Y%m%d_%H%M%S')}_{safe_title}.md"
     target = day_dir / filename
     stem_name = target.stem
-    image_paths = _download_images(image_urls or [], day_dir, stem_name)
+    image_config = image_config or {}
+    prefer_ai_generated = bool(image_config.get("prefer_ai_generated", True))
+    fallback_to_source = bool(image_config.get("fallback_to_source", True))
+    image_source = "none"
+    image_paths: list[str] = []
+
+    if prefer_ai_generated:
+        image_paths, _ = _generate_ai_images(title, content_md, image_config, day_dir, stem_name)
+        if image_paths:
+            image_source = "ai"
+
+    if not image_paths and fallback_to_source:
+        image_paths = _download_images(image_urls or [], day_dir, stem_name)
+        if image_paths:
+            image_source = "source"
+
     final_content = _inject_images_into_markdown(content_md, image_paths)
     try:
         target.write_text(final_content, encoding="utf-8")
@@ -415,4 +636,4 @@ def archive_draft(
         fallback = day_dir / f"{now.strftime('%Y%m%d_%H%M%S')}_{safe_title[:32]}_{now.strftime('%f')}.md"
         fallback.write_text(final_content, encoding="utf-8")
         target = fallback
-    return str(target), len(image_paths)
+    return str(target), len(image_paths), image_source
