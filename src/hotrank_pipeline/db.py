@@ -389,6 +389,58 @@ def persist_article_fetch_result(settings: Settings, result: ArticleFetchResult)
         return fetch_id
 
 
+def fetch_recent_drafts(settings: Settings, limit: int = 20) -> list[dict]:
+    with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select
+                    d.id,
+                    d.cluster_id,
+                    d.model_name,
+                    d.title,
+                    d.archive_path,
+                    d.created_at,
+                    tc.canonical_title,
+                    to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
+                from article_drafts d
+                join topic_clusters tc on tc.id = d.cluster_id
+                order by d.created_at desc, d.id desc
+                limit %s
+                """,
+                (limit,),
+            )
+            return list(cur.fetchall())
+
+
+def fetch_draft_by_id(settings: Settings, draft_id: int) -> dict | None:
+    with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select
+                    d.id,
+                    d.cluster_id,
+                    d.model_name,
+                    d.model_base_url,
+                    d.title,
+                    d.content_md,
+                    d.archive_path,
+                    d.prompt_excerpt,
+                    d.created_at,
+                    tc.canonical_title,
+                    to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
+                from article_drafts d
+                join topic_clusters tc on tc.id = d.cluster_id
+                where d.id = %s
+                limit 1
+                """,
+                (draft_id,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
 def fetch_cluster_sources_for_generation(settings: Settings, limit: int = 1) -> list[dict]:
     with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
         with conn.cursor() as cur:

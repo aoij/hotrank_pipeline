@@ -1,4 +1,4 @@
-# hotrank_pipeline
+﻿# hotrank_pipeline
 
 TopHub 新闻页热点抓取与公众号草稿生成项目，使用本地 PostgreSQL 持久化、聚类、正文补抓，并支持通过 Web 页面配置最终生成模型。
 
@@ -15,7 +15,7 @@ TopHub 新闻页热点抓取与公众号草稿生成项目，使用本地 Postgr
   - 优先使用正文来源图片（如澎湃）
   - 支持限制“每篇最多插图数 / 单来源最多取图数”
 - 按“月份 / 天”两级目录归档到 `T:\微信公众号文档`
-- 提供 FastAPI Web 页面配置模型、API、白名单并触发流程
+- 提供 FastAPI Web 页面配置模型、API、白名单并触发流程`r`n- 内置公众号 Markdown 编辑器，支持打开已生成稿件后直接实时渲染预览
 
 ## 目录
 
@@ -168,3 +168,4 @@ order by s.fetched_at desc, i.rank_num asc;
 1. 更强的原文抓取适配器
 2. 发布前人工审核页
 3. 已发文记录与复盘统计
+

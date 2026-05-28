@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -835,6 +835,24 @@
                 <button type="submit" class="secondary">一键执行</button>
               </form>
             </div>
+
+            <div class="action-card" style="margin-top: 14px;">
+              <h3>公众号编辑器</h3>
+              <p>参考 Markdown 转公众号编辑器交互。点击进入后，左侧改 Markdown，右侧直接渲染预览。</p>
+              <div class="inline-form">
+                <a href="/editor" class="page-btn" style="min-width: 140px; height: 42px; border-color: #93c5fd; color: #1d4ed8;">打开编辑器</a>
+              </div>
+              {% if recent_drafts %}
+              <div style="margin-top: 14px; display: grid; gap: 8px;">
+                {% for draft in recent_drafts %}
+                <a href="/editor?draft_id={{ draft.id }}" style="display:block; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 14px; background: #f8fafc; color: #334155;">
+                  <div style="font-weight: 700; line-height: 1.6;">{{ draft.title }}</div>
+                  <div style="margin-top: 4px; font-size: 12px; color: #94a3b8;">{{ draft.created_at_text }}</div>
+                </a>
+                {% endfor %}
+              </div>
+              {% endif %}
+            </div>
           </div>
         </div>
 
@@ -1017,3 +1035,4 @@
   </script>
 </body>
 </html>
+

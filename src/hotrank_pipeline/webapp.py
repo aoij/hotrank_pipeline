@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from urllib.parse import quote
 
-from fastapi import FastAPI, Form, Request
-from fastapi.responses import JSONResponse
+import markdown
+from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .config import get_settings, load_runtime_config, mask_secret, save_runtime_config
+from .db import fetch_draft_by_id, fetch_recent_drafts
 from .runtime_log import append_runtime_log, latest_notice, read_runtime_logs
 from .services import (
     dashboard_payload,
@@ -22,6 +26,7 @@ from .services import (
 settings = get_settings()
 app = FastAPI(title="Hotrank Pipeline")
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parents[2] / "templates"))
+ROOT_DIR = Path(__file__).resolve().parents[2]
 
 
 def _run_with_log(action_name: str, start_message: str, fn):
@@ -33,12 +38,97 @@ def _run_with_log(action_name: str, start_message: str, fn):
         raise
 
 
+def _allowed_local_roots() -> list[Path]:
+    roots = [(ROOT_DIR / "data").resolve()]
+    runtime = load_runtime_config(settings)
+    draft_output_dir = (runtime.get("draft_output_dir") or "").strip()
+    if draft_output_dir:
+        try:
+            roots.append(Path(draft_output_dir).resolve())
+        except OSError:
+            pass
+    return roots
+
+
+def _is_within_allowed_roots(target: Path) -> bool:
+    resolved = target.resolve()
+    for root in _allowed_local_roots():
+        if resolved == root or root in resolved.parents:
+            return True
+    return False
+
+
+def _rewrite_asset_sources(rendered_html: str, asset_base_dir: Path | None) -> str:
+    if not asset_base_dir:
+        return rendered_html
+
+    def replace_src(match: re.Match[str]) -> str:
+        before = match.group(1)
+        src = (match.group(2) or "").strip()
+        if not src or re.match(r"^(https?:)?//", src) or src.startswith(("data:", "/", "#")):
+            return match.group(0)
+        try:
+            asset_path = (asset_base_dir / src).resolve()
+        except OSError:
+            return match.group(0)
+        if not asset_path.exists() or not asset_path.is_file() or not _is_within_allowed_roots(asset_path):
+            return match.group(0)
+        return f'{before}src="/draft-asset?path={quote(str(asset_path))}"'
+
+    return re.sub(r'(<img\b[^>]*?\bsrc=")([^"]+)(")', replace_src, rendered_html, flags=re.I)
+
+
+def _render_markdown_to_wechat_html(content_md: str, asset_base_dir: Path | None = None) -> str:
+    rendered = markdown.markdown(
+        content_md or "",
+        extensions=["extra", "sane_lists", "tables", "nl2br", "fenced_code"],
+        output_format="html5",
+    )
+    return _rewrite_asset_sources(rendered, asset_base_dir)
+
+
+def _safe_open_local_markdown(path_value: str) -> tuple[Path, str]:
+    if not path_value:
+        raise HTTPException(status_code=400, detail="未提供稿件文件路径")
+
+    target = Path(path_value)
+    if not target.is_absolute():
+        target = (ROOT_DIR / target).resolve()
+    else:
+        target = target.resolve()
+
+    if not _is_within_allowed_roots(target):
+        raise HTTPException(status_code=400, detail="仅允许打开项目 data 目录或稿件归档目录下的文件")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="稿件文件不存在")
+    if target.suffix.lower() != ".md":
+        raise HTTPException(status_code=400, detail="仅支持打开 Markdown 稿件")
+
+    return target, target.read_text(encoding="utf-8")
+
+
+def _safe_resolve_local_path(path_value: str) -> Path:
+    if not path_value:
+        raise HTTPException(status_code=400, detail="未提供文件路径")
+    path = Path(path_value)
+    if not path.is_absolute():
+        path = (ROOT_DIR / path).resolve()
+    else:
+        path = path.resolve()
+    if not _is_within_allowed_roots(path):
+        raise HTTPException(status_code=400, detail="文件路径超出允许范围")
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return path
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, message: str | None = None, cluster_page: int = 1):
     runtime = load_runtime_config(settings)
     payload = dashboard_payload(settings, cluster_page=max(1, cluster_page), cluster_page_size=12)
     logs = read_runtime_logs(limit=80)
     notice = latest_notice(logs)
+    recent_drafts = fetch_recent_drafts(settings, limit=8)
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -48,6 +138,7 @@ def index(request: Request, message: str | None = None, cluster_page: int = 1):
             "masked_api_key": mask_secret(runtime.get("llm", {}).get("api_key", "")),
             "runtime_logs": logs,
             "runtime_notice": notice,
+            "recent_drafts": recent_drafts,
             **payload,
         },
     )
@@ -163,6 +254,85 @@ def action_run_all(draft_limit: int = Form(1)):
         url=f"/?message=全流程完成：drafts={generated}",
         status_code=303,
     )
+
+
+@app.get("/editor", response_class=HTMLResponse)
+def editor_page(
+    request: Request,
+    draft_id: int | None = None,
+    path: str | None = Query(default=None),
+):
+    draft_list = fetch_recent_drafts(settings, limit=30)
+    editor_title = "新建公众号稿件"
+    content_md = "# 标题\n\n## 导语\n\n在这里开始编辑公众号正文。\n"
+    archive_path = ""
+    source_type = "blank"
+    source_id = None
+
+    if draft_id is not None:
+        draft = fetch_draft_by_id(settings, draft_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="未找到对应稿件")
+        editor_title = draft["title"]
+        archive_path = draft.get("archive_path") or ""
+        source_type = "db"
+        source_id = draft["id"]
+        if archive_path:
+            try:
+                target, file_content = _safe_open_local_markdown(archive_path)
+                content_md = file_content
+                archive_path = str(target)
+            except HTTPException:
+                content_md = draft["content_md"] or ""
+        else:
+            content_md = draft["content_md"] or ""
+    elif path:
+        target, file_content = _safe_open_local_markdown(path)
+        editor_title = target.stem
+        content_md = file_content
+        archive_path = str(target)
+        source_type = "file"
+
+    asset_base_dir = Path(archive_path).parent if archive_path else None
+    rendered_html = _render_markdown_to_wechat_html(content_md, asset_base_dir=asset_base_dir)
+    return templates.TemplateResponse(
+        request,
+        "editor.html",
+        {
+            "drafts": draft_list,
+            "editor_title": editor_title,
+            "content_md": content_md,
+            "rendered_html": rendered_html,
+            "archive_path": archive_path,
+            "asset_base_path": archive_path,
+            "source_type": source_type,
+            "source_id": source_id,
+        },
+    )
+
+
+@app.post("/api/render-markdown")
+def render_markdown(content: str = Form(...), asset_base_path: str = Form("")):
+    asset_base_dir = None
+    if asset_base_path.strip():
+        try:
+            asset_base_dir = _safe_resolve_local_path(asset_base_path.strip()).parent
+        except HTTPException:
+            asset_base_dir = None
+    rendered_html = _render_markdown_to_wechat_html(content, asset_base_dir=asset_base_dir)
+    return JSONResponse(
+        {
+            "html": rendered_html,
+            "length": len(content or ""),
+        },
+        media_type="application/json; charset=utf-8",
+    )
+
+
+@app.get("/draft-asset")
+def draft_asset(path: str):
+    target = _safe_resolve_local_path(path)
+    return FileResponse(target)
 
 
 @app.get("/api/runtime-logs")
