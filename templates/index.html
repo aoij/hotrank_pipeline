@@ -1422,6 +1422,10 @@
               <label>生图尺寸</label>
               <input name="image_generation_size" value="{{ runtime.images.generation.size if runtime.images and runtime.images.generation and runtime.images.generation.size else '1024x1024' }}">
 
+              <label>生图并发数</label>
+              <input type="number" min="1" max="12" name="image_generation_concurrency" value="{{ runtime.images.generation.concurrency if runtime.images and runtime.images.generation and runtime.images.generation.concurrency else 4 }}">
+              <div class="form-tip">生图模型较慢时建议 3-4；如果生图服务有并发限制，可调低。</div>
+
               <label>生图 Prompt 模板（可配置）</label>
               <textarea class="prompt-textarea" name="image_generation_prompt_template" placeholder="留空使用系统内置插图 Prompt。可用变量：{article_title}、{section_title}、{section_excerpt}、{image_index}、{image_count}">{{ runtime.images.generation.prompt_template if runtime.images and runtime.images.generation else '' }}</textarea>
               <div class="prompt-help">

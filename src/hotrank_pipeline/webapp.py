@@ -12,7 +12,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .config import get_settings, load_runtime_config, mask_secret, save_runtime_config
-from .db import fetch_draft_by_id, fetch_recent_drafts
+from .db import fetch_draft_by_id, fetch_recent_drafts, update_draft_content
+from .llm import regenerate_draft_images_file
 from .runtime_log import append_runtime_log, latest_notice, read_runtime_logs
 from .services import (
     dashboard_payload,
@@ -223,6 +224,7 @@ def update_config(
     image_generation_model: str = Form(""),
     image_generation_api_key: str = Form(""),
     image_generation_size: str = Form("1024x1024"),
+    image_generation_concurrency: int = Form(4),
     image_generation_prompt_template: str = Form(""),
     image_prefer_ai_generated: str = Form(""),
     image_fallback_to_source: str = Form(""),
@@ -254,6 +256,7 @@ def update_config(
     elif "api_key" not in runtime["images"]["generation"]:
         runtime["images"]["generation"]["api_key"] = ""
     runtime["images"]["generation"]["size"] = image_generation_size.strip() or "1024x1024"
+    runtime["images"]["generation"]["concurrency"] = max(1, min(image_generation_concurrency, 12))
     runtime["images"]["generation"]["prompt_template"] = image_generation_prompt_template.strip()
     runtime.setdefault("content_filter", {})
     runtime["content_filter"]["exclude_newslike"] = content_filter_exclude_newslike == "on"
@@ -458,6 +461,39 @@ def render_html_document(content: str = Form(...), asset_base_path: str = Form("
     return HTMLResponse(
         _render_markdown_to_wechat_html_document(content, asset_base_dir=asset_base_dir),
         media_type="text/html; charset=utf-8",
+    )
+
+
+@app.post("/editor/{draft_id}/regenerate-images")
+def regenerate_editor_images(draft_id: int):
+    draft = fetch_draft_by_id(settings, draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="未找到对应稿件")
+    archive_path = draft.get("archive_path") or ""
+    if not archive_path:
+        raise HTTPException(status_code=400, detail="当前稿件没有归档路径，无法重新生成插图")
+
+    target, file_content = _safe_open_local_markdown(archive_path)
+    runtime = load_runtime_config(settings)
+    image_config = runtime.get("images", {})
+    title = draft.get("title") or draft.get("canonical_title") or target.stem
+    append_runtime_log("info", f"开始重新生成插图：draft_id={draft_id}｜{title}")
+    new_path, image_count, image_source, final_content = regenerate_draft_images_file(
+        archive_path=str(target),
+        title=title,
+        content_md=file_content or draft.get("content_md") or "",
+        image_config=image_config,
+        image_urls=[],
+    )
+    update_draft_content(settings, draft_id=draft_id, content_md=final_content, archive_path=new_path)
+    level = "success" if image_count else "warning"
+    append_runtime_log(
+        level,
+        f"重新生成插图完成：draft_id={draft_id}｜配图 {image_count} 张｜来源={image_source}",
+    )
+    return RedirectResponse(
+        url=f"/editor?draft_id={draft_id}",
+        status_code=303,
     )
 
 

@@ -33,6 +33,7 @@
       "model": "",
       "size": "1024x1024",
       "timeout_seconds": 180,
+      "concurrency": 4,
       "prompt_template": ""
     }
   },

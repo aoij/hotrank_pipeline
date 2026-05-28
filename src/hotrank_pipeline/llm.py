@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -555,9 +556,10 @@ def _generate_ai_images(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    saved_paths: list[str] = []
-    used_prompts: list[str] = []
-    for idx, prompt in enumerate(prompts, start=1):
+    max_workers = max(1, int(generation_config.get("concurrency", min(4, len(prompts)))))
+    max_workers = min(max_workers, len(prompts))
+
+    def generate_one(idx: int, prompt: str) -> tuple[int, str, str] | None:
         payload = {
             "model": model,
             "prompt": prompt,
@@ -575,16 +577,27 @@ def _generate_ai_images(
                 if image_data:
                     break
             if not image_data:
-                continue
+                return None
             body, content_type = image_data
             ext = _guess_extension(content_type, "", body)
             target = asset_dir / f"ai_img_{idx:02d}{ext}"
             target.write_bytes(body)
             relative = Path("assets") / stem_name / target.name
-            saved_paths.append(relative.as_posix())
-            used_prompts.append(prompt)
+            return idx, relative.as_posix(), prompt
         except Exception:
-            continue
+            return None
+
+    results: list[tuple[int, str, str]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(generate_one, idx, prompt) for idx, prompt in enumerate(prompts, start=1)]
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                results.append(result)
+
+    results.sort(key=lambda item: item[0])
+    saved_paths = [path for _, path, _ in results]
+    used_prompts = [prompt for _, _, prompt in results]
 
     if used_prompts:
         prompt_file = asset_dir / "ai_image_prompts.txt"
@@ -646,6 +659,33 @@ def _inject_images_into_markdown(content_md: str, image_paths: list[str]) -> str
     return "\n".join(output).strip() + "\n"
 
 
+def strip_markdown_images(content_md: str) -> str:
+    output: list[str] = []
+    skipping_image_gallery = False
+    for line in content_md.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            heading = stripped.lstrip("#").strip()
+            if heading in {"更多相关画面", "图集补充"}:
+                skipping_image_gallery = True
+                continue
+            skipping_image_gallery = False
+
+        if skipping_image_gallery:
+            if stripped.startswith("## "):
+                skipping_image_gallery = False
+            else:
+                continue
+
+        if re.match(r"^!\[[^\]]*\]\([^)]+\)\s*$", stripped):
+            continue
+        output.append(line)
+
+    cleaned = "\n".join(output)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned + "\n" if cleaned else ""
+
+
 def archive_draft(
     output_dir: str,
     title: str,
@@ -685,3 +725,35 @@ def archive_draft(
         fallback.write_text(final_content, encoding="utf-8")
         target = fallback
     return str(target), len(image_paths), image_source
+
+
+def regenerate_draft_images_file(
+    archive_path: str,
+    title: str,
+    content_md: str,
+    image_config: dict | None = None,
+    image_urls: list[str] | None = None,
+) -> tuple[str, int, str, str]:
+    target = Path(archive_path).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    stem_name = target.stem or sanitize_filename(title)
+    image_config = image_config or {}
+    prefer_ai_generated = bool(image_config.get("prefer_ai_generated", True))
+    fallback_to_source = bool(image_config.get("fallback_to_source", True))
+    clean_content = strip_markdown_images(content_md)
+    image_paths: list[str] = []
+    image_source = "none"
+
+    if prefer_ai_generated:
+        image_paths, _ = _generate_ai_images(title, clean_content, image_config, target.parent, stem_name)
+        if image_paths:
+            image_source = "ai"
+
+    if not image_paths and fallback_to_source:
+        image_paths = _download_images(image_urls or [], target.parent, stem_name)
+        if image_paths:
+            image_source = "source"
+
+    final_content = _inject_images_into_markdown(clean_content, image_paths)
+    target.write_text(final_content, encoding="utf-8")
+    return str(target), len(image_paths), image_source, final_content

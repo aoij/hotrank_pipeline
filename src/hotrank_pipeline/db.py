@@ -583,3 +583,32 @@ def persist_draft_record(
             draft_id = cur.fetchone()[0]
         conn.commit()
         return draft_id
+
+
+def update_draft_content(
+    settings: Settings,
+    draft_id: int,
+    content_md: str,
+    archive_path: str | None = None,
+) -> None:
+    with get_connection(settings) as conn:
+        with conn.cursor() as cur:
+            if archive_path is not None:
+                cur.execute(
+                    """
+                    update article_drafts
+                    set content_md = %s, archive_path = %s
+                    where id = %s
+                    """,
+                    (content_md, archive_path, draft_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    update article_drafts
+                    set content_md = %s
+                    where id = %s
+                    """,
+                    (content_md, draft_id),
+                )
+        conn.commit()
