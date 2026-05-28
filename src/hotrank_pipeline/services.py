@@ -287,6 +287,7 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
         skipped_newslike = 0
     clusters = clusters[:limit]
     generated = []
+    failed = []
     total = len(clusters)
 
     image_generation = image_config.get("generation") or {}
@@ -311,57 +312,75 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
             ),
         )
 
-        title, content_md, prompt_excerpt = generate_wechat_draft(
-            llm_config=llm_config,
-            cluster=cluster,
-            article_sources=cluster["sources"],
-        )
-        _emit(progress_cb, "info", f"[成稿 {idx}/{total}] 模型返回完成：{title}")
-        archive_path, downloaded_images, image_source = archive_draft(
-            runtime_config["draft_output_dir"],
-            title,
-            content_md,
-            image_urls=image_urls,
-            image_config=image_config,
-        )
-        _emit(
-            progress_cb,
-            "info",
-            f"[成稿 {idx}/{total}] 已归档：{archive_path}｜配图 {downloaded_images} 张｜来源={image_source}",
-        )
-        draft_id = persist_draft_record(
-            settings=settings,
-            cluster_id=cluster["cluster_id"],
-            model_name=llm_config["model"],
-            model_base_url=llm_config["base_url"],
-            title=title,
-            content_md=content_md,
-            archive_path=archive_path,
-            prompt_excerpt=prompt_excerpt,
-        )
-        generated.append(
-            {
-                "draft_id": draft_id,
-                "cluster_id": cluster["cluster_id"],
-                "title": title,
-                "archive_path": archive_path,
-                "image_count": downloaded_images,
-                "image_candidate_count": len(image_urls),
-                "image_source": image_source,
-            }
-        )
-        _emit(
-            progress_cb,
-            "success",
-            f"[成稿 {idx}/{total}] 生成完成：draft_id={draft_id}｜{title}",
-        )
+        try:
+            title, content_md, prompt_excerpt = generate_wechat_draft(
+                llm_config=llm_config,
+                cluster=cluster,
+                article_sources=cluster["sources"],
+            )
+            _emit(progress_cb, "info", f"[成稿 {idx}/{total}] 模型返回完成：{title}")
+            archive_path, downloaded_images, image_source = archive_draft(
+                runtime_config["draft_output_dir"],
+                title,
+                content_md,
+                image_urls=image_urls,
+                image_config=image_config,
+            )
+            _emit(
+                progress_cb,
+                "info",
+                f"[成稿 {idx}/{total}] 已归档：{archive_path}｜配图 {downloaded_images} 张｜来源={image_source}",
+            )
+            draft_id = persist_draft_record(
+                settings=settings,
+                cluster_id=cluster["cluster_id"],
+                model_name=llm_config["model"],
+                model_base_url=llm_config["base_url"],
+                title=title,
+                content_md=content_md,
+                archive_path=archive_path,
+                prompt_excerpt=prompt_excerpt,
+            )
+            generated.append(
+                {
+                    "draft_id": draft_id,
+                    "cluster_id": cluster["cluster_id"],
+                    "title": title,
+                    "archive_path": archive_path,
+                    "image_count": downloaded_images,
+                    "image_candidate_count": len(image_urls),
+                    "image_source": image_source,
+                }
+            )
+            _emit(
+                progress_cb,
+                "success",
+                f"[成稿 {idx}/{total}] 生成完成：draft_id={draft_id}｜{title}",
+            )
+        except Exception as exc:
+            failed.append(
+                {
+                    "cluster_id": cluster["cluster_id"],
+                    "title": cluster["canonical_title"],
+                    "error": str(exc),
+                }
+            )
+            _emit(
+                progress_cb,
+                "error",
+                f"[成稿 {idx}/{total}] 生成失败，已跳过继续下一篇：{cluster['canonical_title'][:50]}｜{exc}",
+            )
+            continue
 
     payload = {
         "generated_count": len(generated),
+        "failed_count": len(failed),
         "skipped_newslike": skipped_newslike,
         "drafts": generated,
+        "failed": failed,
     }
-    _emit(progress_cb, "success", f"公众号初稿生成完成：generated={len(generated)}")
+    finish_level = "success" if not failed else "warning"
+    _emit(progress_cb, finish_level, f"公众号初稿生成完成：generated={len(generated)} failed={len(failed)}")
     return payload
 
 

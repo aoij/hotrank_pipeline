@@ -328,11 +328,17 @@ def action_draft(limit: int = Form(1)):
         draft = result["drafts"][0] if result["drafts"] else None
         if draft:
             append_runtime_log(
-                "success",
-                f"初稿完成：{draft['title']}（配图 {draft['image_count']} 张）",
+                "warning" if result.get("failed_count") else "success",
+                (
+                    f"初稿完成：成功 {result['generated_count']} 篇，失败 {result.get('failed_count', 0)} 篇；"
+                    f"最新：{draft['title']}（配图 {draft['image_count']} 张）"
+                ),
             )
         else:
-            append_runtime_log("warning", "初稿生成完成，但本次没有生成新稿件。")
+            append_runtime_log(
+                "warning",
+                f"初稿生成完成，但本次没有生成新稿件。失败 {result.get('failed_count', 0)} 篇",
+            )
 
     started = _start_background_job("生成初稿", worker)
     message = "生成初稿已开始，正在后台处理，可直接看前方日志面板。" if started else "已有任务执行中，请先查看前方日志进度。"
@@ -351,11 +357,12 @@ def action_run_all(draft_limit: int = Form(1)):
         append_runtime_log("info", f"开始执行：一键跑全流程，draft_limit={draft_limit}")
         result = run_full_pipeline(settings, draft_limit=draft_limit, progress_cb=progress)
         generated = result["draft"]["generated_count"]
+        failed = result["draft"].get("failed_count", 0)
         append_runtime_log(
-            "success",
+            "warning" if failed else "success",
             (
                 f"全流程完成：scrape_boards={result['scrape']['board_count']} "
-                f"clusters={result['cluster']['cluster_count']} drafts={generated}"
+                f"clusters={result['cluster']['cluster_count']} drafts={generated} failed={failed}"
             ),
         )
 

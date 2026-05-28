@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,14 @@ GENERIC_HEADING_MAP = {
     "为什么值得关注",
     "结语",
 }
+
+
+RETRYABLE_REQUEST_EXCEPTIONS = (
+    requests.exceptions.SSLError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
 
 
 def sanitize_filename(name: str) -> str:
@@ -55,6 +64,44 @@ def _image_generation_endpoint(base_url: str) -> str:
     if endpoint.endswith("/images/generations"):
         return endpoint
     return f"{endpoint}/images/generations"
+
+
+def _post_json_with_retry(
+    url: str,
+    headers: dict[str, str],
+    payload: dict,
+    timeout: int,
+    retry_count: int = 3,
+    backoff_seconds: float = 2.0,
+) -> requests.Response:
+    last_error: Exception | None = None
+    retry_count = max(1, retry_count)
+    for attempt in range(1, retry_count + 1):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            if response.status_code in (429, 500, 502, 503, 504) and attempt < retry_count:
+                last_error = requests.HTTPError(
+                    f"retryable status {response.status_code}: {response.text[:200]}",
+                    response=response,
+                )
+                time.sleep(backoff_seconds * attempt)
+                continue
+            response.raise_for_status()
+            return response
+        except RETRYABLE_REQUEST_EXCEPTIONS as exc:
+            last_error = exc
+            if attempt >= retry_count:
+                break
+            time.sleep(backoff_seconds * attempt)
+        except requests.HTTPError as exc:
+            last_error = exc
+            status_code = exc.response.status_code if exc.response is not None else None
+            if status_code not in (429, 500, 502, 503, 504) or attempt >= retry_count:
+                break
+            time.sleep(backoff_seconds * attempt)
+    if last_error:
+        raise last_error
+    raise RuntimeError("request failed without response")
 
 
 def _decode_data_url(value: str) -> tuple[bytes, str]:
@@ -431,16 +478,17 @@ def generate_wechat_draft(
         "max_tokens": llm_config.get("max_tokens", 2400),
     }
 
-    response = requests.post(
+    response = _post_json_with_retry(
         f"{llm_config['base_url'].rstrip('/')}/chat/completions",
         headers={
             "Authorization": f"Bearer {llm_config['api_key']}",
             "Content-Type": "application/json",
         },
-        json=payload,
-        timeout=180,
+        payload=payload,
+        timeout=int(llm_config.get("timeout_seconds", 180)),
+        retry_count=int(llm_config.get("retry_count", 3)),
+        backoff_seconds=float(llm_config.get("retry_backoff_seconds", 2.0)),
     )
-    response.raise_for_status()
     data = response.json()
     content = _soften_generic_headings(data["choices"][0]["message"]["content"].strip(), editorial_plan)
 
