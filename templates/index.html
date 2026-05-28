@@ -1514,6 +1514,17 @@
                 <code>{article_title}</code>、<code>{section_title}</code>、<code>{section_excerpt}</code>、<code>{image_index}</code>、<code>{image_count}</code>。
               </div>
 
+
+              <label>微信公众号网关地址</label>
+              <input name="wechat_gateway_base_url" value="{{ runtime.wechat_gateway.base_url if runtime.wechat_gateway is defined else 'http://106.12.11.147:18080' }}" placeholder="例如：http://106.12.11.147:18080">
+
+              <label>微信公众号网关 Token（留空则保持当前值）</label>
+              <input name="wechat_gateway_token" placeholder="当前已配置则留空即可">
+
+              <label>推送公众号单篇最多上传图片数</label>
+              <input type="number" min="1" max="8" name="wechat_gateway_max_images" value="{{ runtime.wechat_gateway.max_images if runtime.wechat_gateway is defined and runtime.wechat_gateway.max_images else 4 }}">
+              <div class="form-tip">微信草稿接口对标题、摘要、图片上传有约束；系统会自动缩短标题、默认不传摘要，并上传封面与正文图片。</div>
+
               <div style="margin-top: 16px;">
                 <button type="submit" class="full-button">保存当前配置</button>
               </div>

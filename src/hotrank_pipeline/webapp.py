@@ -24,6 +24,7 @@ from .services import (
     run_review_drafts,
     run_scrape,
 )
+from .wechat_publisher import publish_draft_to_wechat
 
 
 settings = get_settings()
@@ -227,6 +228,9 @@ def update_config(
     image_generation_size: str = Form("1024x1024"),
     image_generation_concurrency: int = Form(4),
     image_generation_prompt_template: str = Form(""),
+    wechat_gateway_base_url: str = Form(""),
+    wechat_gateway_token: str = Form(""),
+    wechat_gateway_max_images: int = Form(4),
     image_prefer_ai_generated: str = Form(""),
     image_fallback_to_source: str = Form(""),
     content_filter_exclude_newslike: str = Form(""),
@@ -261,6 +265,13 @@ def update_config(
     runtime["images"]["generation"]["prompt_template"] = image_generation_prompt_template.strip()
     runtime.setdefault("content_filter", {})
     runtime["content_filter"]["exclude_newslike"] = content_filter_exclude_newslike == "on"
+    runtime.setdefault("wechat_gateway", {})
+    runtime["wechat_gateway"]["base_url"] = wechat_gateway_base_url.strip() or "http://106.12.11.147:18080"
+    if wechat_gateway_token.strip():
+        runtime["wechat_gateway"]["token"] = wechat_gateway_token.strip()
+    elif "token" not in runtime["wechat_gateway"]:
+        runtime["wechat_gateway"]["token"] = ""
+    runtime["wechat_gateway"]["max_images"] = max(1, min(wechat_gateway_max_images, 8))
     save_runtime_config(settings, runtime)
     append_runtime_log(
         "success",
@@ -515,6 +526,32 @@ def regenerate_editor_images(draft_id: int):
     )
     return RedirectResponse(
         url=f"/editor?draft_id={draft_id}",
+        status_code=303,
+    )
+
+
+@app.post("/editor/{draft_id}/publish-wechat")
+def publish_editor_wechat(draft_id: int):
+    draft = fetch_draft_by_id(settings, draft_id)
+    title = (draft or {}).get("title") or f"draft_id={draft_id}"
+    append_runtime_log("info", f"开始推送公众号草稿箱：draft_id={draft_id}｜{title[:60]}")
+    try:
+        result = publish_draft_to_wechat(settings, draft_id)
+    except Exception as exc:
+        append_runtime_log("error", f"公众号草稿箱推送失败：draft_id={draft_id}｜{exc}")
+        return RedirectResponse(
+            url=f"/editor?draft_id={draft_id}&wechat_publish=failed&error={quote(str(exc))}",
+            status_code=303,
+        )
+    append_runtime_log(
+        "success",
+        (
+            f"公众号草稿箱推送成功：draft_id={draft_id}｜"
+            f"标题={result['wechat_title']}｜插图={result['uploaded_image_count']}｜media_id={result['media_id']}"
+        ),
+    )
+    return RedirectResponse(
+        url=f"/editor?draft_id={draft_id}&wechat_publish=success",
         status_code=303,
     )
 

@@ -85,6 +85,7 @@
       pointer-events: none;
     }
 
+
     .regen-overlay {
       position: fixed;
       inset: 0;
@@ -99,6 +100,23 @@
 
     .regen-overlay.show {
       display: flex;
+    }
+
+    .publish-notice {
+      margin: 12px 0 0;
+      padding: 12px 14px;
+      border-radius: 14px;
+      font-size: 13px;
+      line-height: 1.7;
+      border: 1px solid #bbf7d0;
+      background: #f0fdf4;
+      color: #166534;
+    }
+
+    .publish-notice.failed {
+      border-color: #fecaca;
+      background: #fef2f2;
+      color: #991b1b;
     }
 
     .regen-dialog {
@@ -473,6 +491,16 @@
             <a class="btn-link primary" href="/editor" style="width: 100%;">打开空白编辑器</a>
           </div>
           {% if source_type == 'db' and source_id %}
+          {% if request.query_params.get('wechat_publish') == 'success' %}
+          <div class="publish-notice">已成功推送到微信公众号草稿箱，请到公众号后台草稿箱查看。</div>
+          {% elif request.query_params.get('wechat_publish') == 'failed' %}
+          <div class="publish-notice failed">推送微信公众号草稿箱失败，请查看控制台执行日志。{% if request.query_params.get('error') %}<br>{{ request.query_params.get('error') }}{% endif %}</div>
+          {% endif %}
+          <form method="post" action="/editor/{{ source_id }}/publish-wechat" style="margin-top: 12px;" id="publishWechatForm">
+            <button class="btn-link primary" type="submit" style="width: 100%; cursor: pointer;" id="publishWechatBtn">推送到微信公众号草稿箱</button>
+          </form>
+          <div class="copy-tip" style="margin: 10px 0 0;">会自动上传封面和正文插图，并处理微信标题/摘要长度限制；推送成功后去公众号后台草稿箱继续审核发布。</div>
+
           <form method="post" action="/editor/{{ source_id }}/regenerate-images" style="margin-top: 12px;" id="regenerateImagesForm">
             <button class="btn-link" type="submit" style="width: 100%; cursor: pointer;" id="regenerateImagesBtn">重新生成插图</button>
           </form>
@@ -561,9 +589,18 @@
   <div class="regen-overlay" id="regenOverlay" aria-hidden="true">
     <div class="regen-dialog" role="status" aria-live="polite">
       <div class="regen-spinner"></div>
-      <h3>正在重新生成插图</h3>
-      <p>系统正在删除旧图片引用，并按当前生图配置重新生成插图。</p>
-      <div class="regen-hint">AI 生图可能需要 1-5 分钟，请不要关闭页面或重复点击。完成后会自动回到当前稿件。</div>
+      <h3 id="busyTitle">正在重新生成插图</h3>
+      <p id="busyDesc">系统正在删除旧图片引用，并按当前生图配置重新生成插图。</p>
+      <div class="regen-hint" id="busyHint">AI 生图可能需要 1-5 分钟，请不要关闭页面或重复点击。完成后会自动回到当前稿件。</div>
+    </div>
+  </div>
+
+  <div class="regen-overlay" id="publishOverlay" aria-hidden="true">
+    <div class="regen-dialog" role="status" aria-live="polite">
+      <div class="regen-spinner"></div>
+      <h3>正在推送到公众号草稿箱</h3>
+      <p>系统正在上传封面、正文图片和文章 HTML。</p>
+      <div class="regen-hint">图片较多时可能需要几十秒，请不要关闭页面或重复点击。完成后会自动返回当前稿件。</div>
     </div>
   </div>
 
@@ -578,6 +615,9 @@
     const regenerateImagesForm = document.getElementById("regenerateImagesForm");
     const regenerateImagesBtn = document.getElementById("regenerateImagesBtn");
     const regenOverlay = document.getElementById("regenOverlay");
+    const publishWechatForm = document.getElementById("publishWechatForm");
+    const publishWechatBtn = document.getElementById("publishWechatBtn");
+    const publishOverlay = document.getElementById("publishOverlay");
     const assetBasePath = {{ (asset_base_path or '') | tojson }};
 
     let renderTimer = null;
@@ -611,13 +651,38 @@
       }, 350);
     });
 
+    function showBusyOverlay(title, desc, hint) {
+      if (!regenOverlay) return;
+      const busyTitle = document.getElementById("busyTitle");
+      const busyDesc = document.getElementById("busyDesc");
+      const busyHint = document.getElementById("busyHint");
+      if (busyTitle) busyTitle.textContent = title;
+      if (busyDesc) busyDesc.textContent = desc;
+      if (busyHint) busyHint.textContent = hint;
+      regenOverlay.classList.add("show");
+      regenOverlay.setAttribute("aria-hidden", "false");
+    }
+
     if (regenerateImagesForm && regenerateImagesBtn && regenOverlay) {
       regenerateImagesForm.addEventListener("submit", () => {
         regenerateImagesBtn.disabled = true;
         regenerateImagesBtn.classList.add("is-loading");
         regenerateImagesBtn.textContent = "正在生成插图，请稍候...";
-        regenOverlay.classList.add("show");
-        regenOverlay.setAttribute("aria-hidden", "false");
+        showBusyOverlay(
+          "正在重新生成插图",
+          "系统正在删除旧图片引用，并按当前生图配置重新生成插图。",
+          "AI 生图可能需要 1-5 分钟，请不要关闭页面或重复点击。完成后会自动回到当前稿件。"
+        );
+      });
+    }
+
+    if (publishWechatForm && publishWechatBtn && publishOverlay) {
+      publishWechatForm.addEventListener("submit", () => {
+        publishWechatBtn.disabled = true;
+        publishWechatBtn.classList.add("is-loading");
+        publishWechatBtn.textContent = "正在推送，请稍候...";
+        publishOverlay.classList.add("show");
+        publishOverlay.setAttribute("aria-hidden", "false");
       });
     }
 

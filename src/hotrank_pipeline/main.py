@@ -13,6 +13,7 @@ from .services import (
     run_review_drafts,
     run_scrape,
 )
+from .wechat_publisher import publish_recent_drafts_to_wechat
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     draft_parser.add_argument("--limit", type=int, default=1, help="最多生成多少篇")
     review_parser = subparsers.add_parser("review-drafts", help="让模型审核已生成初稿并写入文章评分")
     review_parser.add_argument("--limit", type=int, default=10, help="最多评分多少篇未评分初稿")
+    publish_parser = subparsers.add_parser("publish-wechat-drafts", help="把高分初稿推送到微信公众号草稿箱")
+    publish_parser.add_argument("--limit", type=int, default=10, help="最多推送多少篇")
     pipeline_parser = subparsers.add_parser("run-pipeline", help="执行 scrape -> cluster -> enrich -> generate")
     pipeline_parser.add_argument("--draft-limit", type=int, default=1, help="完整流程最后生成多少篇")
     web_parser = subparsers.add_parser("run-web", help="启动 Web 页面")
@@ -67,6 +70,10 @@ def main() -> int:
 
     if args.command == "review-drafts":
         print(json.dumps(run_review_drafts(settings, limit=args.limit), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "publish-wechat-drafts":
+        print(json.dumps(publish_recent_drafts_to_wechat(settings, limit=args.limit), ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "run-pipeline":
