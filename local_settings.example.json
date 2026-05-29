@@ -22,6 +22,29 @@
     "max_articles_per_cluster": 4,
     "max_clusters_per_run": 6
   },
+  "content_sources": {
+    "enabled": true,
+    "include_tophub": true,
+    "dailyhot_base_url": "",
+    "dailyhot_routes": [
+      "weibo",
+      "zhihu",
+      "baidu",
+      "bilibili",
+      "36kr",
+      "huxiu",
+      "juejin",
+      "v2ex",
+      "hellogithub"
+    ],
+    "rss_feeds": [
+      {
+        "name": "V2EX 最热",
+        "url": "https://rsshub.app/v2ex/topics/hot"
+      }
+    ],
+    "max_items_per_board": 30
+  },
   "images": {
     "max_per_draft": 6,
     "max_per_source": 4,
