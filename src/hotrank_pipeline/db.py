@@ -453,6 +453,28 @@ def fetch_draft_by_id(settings: Settings, draft_id: int) -> dict | None:
             return dict(row) if row else None
 
 
+def delete_drafts_by_ids(settings: Settings, draft_ids: list[int]) -> list[dict]:
+    ids = sorted({int(draft_id) for draft_id in draft_ids if int(draft_id) > 0})
+    if not ids:
+        return []
+    with get_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select id, title, archive_path
+                from article_drafts
+                where id = any(%s)
+                order by id
+                """,
+                (ids,),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+            if rows:
+                cur.execute("delete from article_drafts where id = any(%s)", (ids,))
+        conn.commit()
+    return rows
+
+
 def fetch_unreviewed_drafts(settings: Settings, limit: int = 10) -> list[dict]:
     with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
