@@ -155,8 +155,10 @@ def fetch_stats(settings: Settings) -> dict[str, int]:
 def fetch_latest_whitelisted_items(settings: Settings, whitelist_boards: list[str]) -> list[dict]:
     with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
+            where_clause = "where board_name = any(%s)" if whitelist_boards else ""
+            params = (whitelist_boards,) if whitelist_boards else ()
             cur.execute(
-                """
+                f"""
                 select
                     item_id,
                     board_name,
@@ -170,10 +172,10 @@ def fetch_latest_whitelisted_items(settings: Settings, whitelist_boards: list[st
                     fetched_at,
                     updated_text
                 from v_latest_board_items
-                where board_name = any(%s)
+                {where_clause}
                 order by board_name, rank_num
                 """,
-                (whitelist_boards,),
+                params,
             )
             return list(cur.fetchall())
 
