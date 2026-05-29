@@ -1236,7 +1236,7 @@
                   <span class="step-num">01</span>
                   <h3>抓取热点</h3>
                 </div>
-                <p>从 TopHub 新闻页抓取最新榜单与条目，写入本地 PostgreSQL。</p>
+                <p>按配置抓取 TopHub、DailyHot API、RSSHub/RSS 等内容源，写入本地 PostgreSQL。</p>
                 <form class="action-foot" method="post" action="/actions/scrape">
                   <button type="submit" class="full-button">立即抓取</button>
                 </form>
@@ -1431,6 +1431,17 @@
                 <span class="overview-val">{{ runtime.board_whitelist | join('、') }}</span>
               </div>
               <div class="overview-item">
+                <span class="overview-key">内容源</span>
+                <span class="overview-val">
+                  {% if content_sources.include_tophub %}TopHub{% endif %}
+                  {% if content_sources.enabled %}
+                    {% if content_sources.include_tophub %} + {% endif %}
+                    扩展源 {{ (content_sources.dailyhot_routes | length) + (content_sources.rss_feeds | length) }} 个
+                  {% endif %}
+                  {% if not content_sources.include_tophub and not content_sources.enabled %}未启用{% endif %}
+                </span>
+              </div>
+              <div class="overview-item">
                 <span class="overview-key">归档目录</span>
                 <code class="overview-code">{{ runtime.draft_output_dir }}</code>
               </div>
@@ -1468,6 +1479,31 @@
 
               <label>榜单白名单（逗号分隔）</label>
               <textarea name="board_whitelist">{{ runtime.board_whitelist | join(', ') }}</textarea>
+              <div class="form-tip">留空表示所有已入库榜单都参与聚类；多来源接入后建议保留：微博、知乎、百度、B站、36氪、虎嗅、掘金、V2EX、HelloGitHub、澎湃、微信。</div>
+
+              <label>
+                <input type="checkbox" name="content_sources_include_tophub" {% if content_sources.include_tophub %}checked{% endif %} style="width:auto; margin-right:8px;">
+                抓取 TopHub 新闻页
+              </label>
+
+              <label>
+                <input type="checkbox" name="content_sources_enabled" {% if content_sources.enabled %}checked{% endif %} style="width:auto; margin-right:8px;">
+                启用扩展内容源（DailyHot / RSSHub / RSS）
+              </label>
+
+              <label>DailyHot API 地址</label>
+              <input name="dailyhot_base_url" value="{{ content_sources.dailyhot_base_url or '' }}" placeholder="例如：http://127.0.0.1:6688 或 https://hot-api.xxx.com">
+              <div class="form-tip">可接入自建 DailyHotApi。系统会按下面的 route 拼接请求，例如 /weibo、/zhihu、/bilibili。</div>
+
+              <label>DailyHot Routes（逗号或换行分隔）</label>
+              <textarea name="dailyhot_routes">{{ content_sources.dailyhot_routes | join('\n') }}</textarea>
+
+              <label>RSS / RSSHub 源（每行一个，格式：名称|URL）</label>
+              <textarea name="rss_feeds" placeholder="V2EX 最热|https://rsshub.app/v2ex/topics/hot&#10;少数派|https://rsshub.app/sspai/index">{{ rss_feeds_text }}</textarea>
+              <div class="form-tip">适合接 RSSHub、垂直站 RSS、行业信息源。入库后复用现有聚类、补抓、成稿链路。</div>
+
+              <label>单个内容源最多抓取条目数</label>
+              <input type="number" min="1" max="100" name="content_sources_max_items" value="{{ content_sources.max_items_per_board or 30 }}">
 
               <label>
                 <input type="checkbox" name="content_filter_exclude_newslike" {% if runtime.content_filter is not defined or runtime.content_filter.exclude_newslike %}checked{% endif %} style="width:auto; margin-right:8px;">
