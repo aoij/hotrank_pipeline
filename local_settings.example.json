@@ -68,7 +68,7 @@
     "api_key": "",
     "model": "mimo-v2.5",
     "temperature": 0.65,
-    "max_tokens": 2400,
+    "max_tokens": 4200,
     "timeout_seconds": 180,
     "retry_count": 3,
     "retry_backoff_seconds": 2.0,

@@ -1468,10 +1468,10 @@
               <input name="llm_api_key" placeholder="当前：{{ masked_api_key }}">
 
               <label>生成文章 Prompt（可配置）</label>
-              <textarea class="prompt-textarea" name="llm_draft_prompt" placeholder="留空使用系统内置公众号多样化 Prompt。可用变量：{topic}、{cluster_summary}、{item_count}、{sources}、{editorial_plan_name}、{editorial_tone}、{opening_strategy}、{section_suggestions}">{{ runtime.llm.draft_prompt or '' }}</textarea>
+              <textarea class="prompt-textarea" name="llm_draft_prompt" placeholder="留空使用系统内置公众号主笔 Prompt。可用变量：{topic}、{cluster_summary}、{item_count}、{sources}、{editorial_plan_name}、{editorial_tone}、{opening_strategy}、{section_suggestions}、{purpose}、{expected_words}、{timeliness}">{{ runtime.llm.draft_prompt or '' }}</textarea>
               <div class="prompt-help">
                 留空会使用默认公众号 Prompt；填写后会完全按这里生成。支持变量：
-                <code>{topic}</code>、<code>{cluster_summary}</code>、<code>{item_count}</code>、<code>{sources}</code>、<code>{editorial_plan_name}</code>、<code>{editorial_tone}</code>、<code>{opening_strategy}</code>、<code>{section_suggestions}</code>。
+                <code>{topic}</code>、<code>{cluster_summary}</code>、<code>{item_count}</code>、<code>{sources}</code>、<code>{editorial_plan_name}</code>、<code>{editorial_tone}</code>、<code>{opening_strategy}</code>、<code>{section_suggestions}</code>、<code>{purpose}</code>、<code>{expected_words}</code>、<code>{timeliness}</code>。
               </div>
 
               <label>稿件归档目录</label>

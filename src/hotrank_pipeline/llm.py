@@ -378,6 +378,7 @@ def _build_image_prompts(
 
 def _soften_generic_headings(content_md: str, plan: dict) -> str:
     """Avoid every generated article keeping the old fixed five-section skeleton."""
+    content_md = _extract_publishable_draft(content_md)
     section_titles = plan.get("section_titles") or []
     if not section_titles:
         return content_md
@@ -394,6 +395,39 @@ def _soften_generic_headings(content_md: str, plan: dict) -> str:
                 replacement_index += 1
         output.append(line)
     return "\n".join(output).strip() + "\n"
+
+
+def _extract_publishable_draft(content_md: str) -> str:
+    content = (content_md or "").strip()
+    if not content:
+        return content
+    content = re.sub(r"^```(?:markdown|md)?\s*", "", content, flags=re.I)
+    content = re.sub(r"\s*```$", "", content)
+
+    markers = [
+        "六、优化后完整稿件",
+        "六、优化后完整稿",
+        "## 六、优化后完整稿件",
+        "# 六、优化后完整稿件",
+        "优化后完整稿件",
+    ]
+    for marker in markers:
+        index = content.find(marker)
+        if index < 0:
+            continue
+        extracted = content[index + len(marker) :].strip()
+        extracted = re.sub(r"^[：:\-\s]+", "", extracted).strip()
+        next_section = re.search(r"\n(?:#{1,3}\s*)?七、备选标题", extracted)
+        if next_section:
+            extracted = extracted[: next_section.start()].strip()
+        if extracted:
+            content = extracted
+            break
+
+    heading_match = re.search(r"(?m)^#\s+.+$", content)
+    if heading_match and heading_match.start() > 0:
+        content = content[heading_match.start() :].strip()
+    return content.strip() + "\n"
 
 
 def generate_wechat_draft(
@@ -425,53 +459,69 @@ def generate_wechat_draft(
         "editorial_tone": str(editorial_plan["tone"]),
         "opening_strategy": str(editorial_plan["opening"]),
         "section_suggestions": section_suggestions,
+        "purpose": "热点解读 / 科普 / 风险提醒",
+        "expected_words": "1500-2500 字",
+        "timeliness": "来自当前热点聚类，存在一定时效性；具体事实以来源材料为准",
     }
 
-    default_prompt = """你是一名资深微信公众号编辑，请根据下面的热点聚类和来源摘要，写一篇可直接用于公众号发布前审核的图文初稿。
+    default_prompt = """# 角色
+你是这个公众号的资深主笔兼内容编辑，同时兼任审慎的事实核查助手。
 
-写作目标：
-1. 成稿要像成熟公众号文章，适合直接进入人工润色/排版/发布环节。
-2. 风格要克制、可信、流畅，有信息密度，也要有阅读节奏和公众号阅读感。
-3. 不要写成新闻播报口吻，也不要写成“AI总结”“资料汇编”口吻。
-4. 文章要有“编辑选择”：不是把材料复述一遍，而是帮读者完成理解、判断和延展。
+# 账号定位（固定）
+- 面向普通大众，主打：科技生活 / 网络安全 / AI 工具 / 社会热点解读
+- 风格：通俗易懂、有场景感、有传播性
+- 红线：不写成技术报告，不制造恐慌
+- 核心价值：把复杂问题讲简单，把潜在风险讲清楚，把普通人能做的应对讲具体
 
-输出要求：
-1. 使用中文输出，格式为 Markdown。
+# 这次任务的背景
+- 本文主题/由头：{topic}
+- 目的：{purpose}
+- 期望字数：{expected_words}
+- 有没有时效性/具体事件：{timeliness}
+
+# 工作模式
+B. 直接出稿：给一版可直接发布的干净稿。
+
+重要说明：本系统当前是在“自动生成公众号初稿”。请只输出“优化后完整稿件”本身，不要输出诊断、改动说明、标题分类清单，也不要输出“一、总体评价”等全套模式字段。
+
+# 硬性原则
+1. 不改变文章核心观点。
+2. 绝不编造数据、案例、新闻细节、专家观点、出处。不确定的一律标【需补来源】，宁可空着，不要编一个“看起来可信”的说法。涉及具体事件、数字、最新进展时尤其谨慎。
+3. 不制造恐慌：讲风险要讲清“概率多大、影响谁、严重到什么程度”，不用“细思极恐”“所有人都危险了”“赶紧删”这类话术。风险讲完必须配“普通人能做的具体应对”。
+4. 不写成技术报告：专业概念用类比、生活场景解释；能用大白话就不用术语；非要用术语，后面跟一句人话解释。
+5. 去 AI 味：禁止排比堆砌、“不仅…而且”“让我们一起”“在这个…时代”“随着…的发展”“综上所述”、强行总分总、每段金句收尾。写得像一个懂行的朋友在跟你聊。
+6. 不标题党：不用“震惊”“速看”“紧急”“99%的人都不知道”；钩子要对得起内容。
+7. 适配微信：第一句就得勾住人；正文不依赖外链；段落短，3-4 行一段，适当留白。
+8. 不要在正文中写“配图”“图片占位符”“见下图”等字样，图片会由程序自动插入。
+
+# 开头与标题的钩子偏好
+- 优先用：具体场景、读者切身相关、反常识、把大新闻翻译成“跟我有什么关系”。
+- 安全 / AI 类开头别上来讲原理，先讲“这事会怎么发生在你身上”。
+
+# 输出格式（必须遵守）
+1. 使用中文 Markdown。
 2. 第一行必须是一级标题：# 标题
-3. 不要再使用固定五段模板，尤其不要机械套用“导语 / 事件脉络 / 关键信息 / 为什么值得关注 / 结语”。
-4. 请根据素材自由组织 5-7 个二级标题；小标题要像公众号编辑写的自然标题，不要像报告目录。
-5. 正文建议 1200-1800 字，段落短，每段尽量 1-3 句话，适合手机端阅读。
-6. 至少加入 2 种增强阅读节奏的模块，例如：
-   - `> 一句话先看：...`
-   - `- 重点一 / 重点二 / 重点三`
-   - `**一个容易被忽略的细节是：**...`
-   - 简短时间线、影响清单、误读提醒、后续观察点
-7. 可适度提炼观点，但不能编造事实、数据、引语或未经来源支持的判断。
-8. 如果信息不完整，请明确写“截至目前公开报道显示”或“目前公开信息有限”，不要硬补细节。
-9. 标题要适合公众号传播，清晰、自然、有可读性，不要标题党，不要夸张煽动。
-10. 结尾不要写“对此你怎么看”“欢迎留言”等强互动套话，要自然收束。
-11. 不要输出代码块，不要输出“以下是文章”之类说明性前缀。
-12. 不要在正文中写“配图”“图片占位符”“见下图”等字样，图片会由程序自动插入。
+3. 第二行开始直接进入正文，不要写“以下是文章”。
+4. 正文自由组织 4-7 个二级标题；小标题要像公众号编辑写的自然标题，不要像报告目录。
+5. 每段尽量 1-3 句话，适合手机端阅读。
+6. 允许使用少量列表、引用块、提醒卡片，但不要模板化。
+7. 结尾自然收束，不要写“对此你怎么看”“欢迎留言”等强互动套话。
 
-本篇建议方向：
+# 本篇建议方向
 - 文章类型：{editorial_plan_name}
 - 语气策略：{editorial_tone}
 - 开头方式：{opening_strategy}
 - 可参考但不要死套的小标题方向：
 {section_suggestions}
 
-风格要求：
-- 语言有温度，但不过度抒情
-- 多用短句和短段
-- 能帮助读者快速看懂事件、抓住重点、理解背后的公共讨论价值
-- 保持事实与观点分层清晰
-- 每篇文章都要有一点不同的结构和表达，不要让读者感觉是同一个模板换了标题
+# 素材边界
+- 热点摘要：{cluster_summary}
+- 聚类成员数：{item_count}
+- 所有事实只能来自下面“来源材料”。
+- 如果来源材料不足以支撑某个判断，请写【需补来源】或改成更谨慎的表述。
+- 可以做解释、类比和普通人应对建议，但不要补造事实。
 
-热点主题：{topic}
-热点摘要：{cluster_summary}
-聚类成员数：{item_count}
-
-来源材料：
+# 来源材料
 {sources}
 """
     custom_prompt = (llm_config.get("draft_prompt") or "").strip()
@@ -482,7 +532,7 @@ def generate_wechat_draft(
         "messages": [
             {
                 "role": "system",
-                "content": "你是一个擅长热点议题写作的中文公众号编辑，强调事实准确、结构清晰、语言自然、适合发布。",
+                "content": "你是中文公众号资深主笔兼审慎事实核查助手。只输出可直接发布的 Markdown 初稿，事实必须来自用户提供的来源材料，不确定就标【需补来源】。",
             },
             {"role": "user", "content": prompt},
         ],
