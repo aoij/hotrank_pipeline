@@ -572,6 +572,8 @@ def fetch_cluster_sources_for_generation(settings: Settings, limit: int = 1) -> 
                     tci.rank_num,
                     tci.title as member_title,
                     tci.source_url,
+                    a.source_host,
+                    a.final_url,
                     a.title,
                     a.summary,
                     a.content_text,

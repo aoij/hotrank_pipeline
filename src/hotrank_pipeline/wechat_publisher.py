@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+from html import escape
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -20,38 +21,21 @@ TITLE_BYTE_LIMIT = 30
 MAX_DIGEST_CHARS = 0
 DEFAULT_MAX_IMAGES = 4
 
+WX_FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',Arial,sans-serif"
+
 ARTICLE_STYLE = (
-    "color:#1f2937;"
-    "font:16px/1.9 -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;"
-    "word-break:break-word;letter-spacing:.02em;box-sizing:border-box;"
+    "margin:0 auto;padding:0;color:#1f2937;"
+    f"font-family:{WX_FONT};font-size:16px;line-height:1.9;"
+    "letter-spacing:.03em;word-break:break-word;box-sizing:border-box;"
 )
 
-STYLE_MAP = {
-    "h1": "font-size:26px;line-height:1.45;margin:0 0 18px;color:#111827;font-weight:700;",
-    "h2": (
-        "font-size:22px;line-height:1.55;margin:30px 0 14px;"
-        "padding-left:12px;border-left:4px solid #2563eb;color:#111827;font-weight:700;box-sizing:border-box;"
-    ),
-    "h3": "font-size:18px;line-height:1.55;margin:22px 0 10px;color:#111827;font-weight:700;",
-    "p": "margin:14px 0;line-height:1.9;color:#1f2937;font-size:16px;text-align:justify;",
-    "blockquote": (
-        "margin:16px 0;padding:12px 14px;background:#f8fafc;"
-        "border-left:4px solid #93c5fd;color:#475569;box-sizing:border-box;"
-    ),
-    "ul": "padding-left:22px;margin:14px 0;",
-    "ol": "padding-left:22px;margin:14px 0;",
-    "li": "margin:6px 0;line-height:1.8;",
-    "strong": "font-weight:700;color:#111827;",
-    "em": "font-style:normal;color:#475569;",
-    "a": "color:#2563eb;text-decoration:none;border-bottom:1px solid #bfdbfe;",
-    "hr": "border:0;border-top:1px solid #e5e7eb;margin:26px 0;",
-    "code": "font-family:Menlo,Consolas,monospace;background:#f1f5f9;border-radius:4px;padding:2px 4px;font-size:14px;",
-    "pre": "white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin:16px 0;font-size:14px;line-height:1.7;",
-    "img": "display:block;width:100%;max-width:100%;height:auto;margin:18px auto;border-radius:12px;box-sizing:border-box;",
-    "table": "width:100%;border-collapse:collapse;margin:18px 0;font-size:14px;box-sizing:border-box;",
-    "th": "border:1px solid #dbe3ef;padding:8px 10px;",
-    "td": "border:1px solid #dbe3ef;padding:8px 10px;",
-}
+PARAGRAPH_STYLE = "margin:0 0 18px;line-height:1.9;color:#1f2937;font-size:16px;text-align:justify;"
+H2_STYLE = "margin:34px 0 16px;padding:0 0 0 12px;border-left:4px solid #2563eb;color:#111827;font-size:21px;line-height:1.5;font-weight:700;box-sizing:border-box;"
+H3_STYLE = "margin:28px 0 12px;color:#111827;font-size:18px;line-height:1.6;font-weight:700;"
+STRONG_STYLE = "font-weight:700;color:#111827;"
+MUTED_STYLE = "color:#64748b;font-size:14px;line-height:1.7;"
+IMG_STYLE = "display:block;width:100%;max-width:100%;height:auto;margin:20px auto;border-radius:10px;box-sizing:border-box;"
+BLOCKQUOTE_STYLE = "margin:18px 0;padding:14px 16px;background:#f8fafc;border-left:4px solid #93c5fd;color:#475569;box-sizing:border-box;"
 
 
 def _short_title(title: str, byte_limit: int = TITLE_BYTE_LIMIT) -> str:
@@ -143,10 +127,137 @@ def _strip_first_h1(soup: BeautifulSoup) -> None:
         h1.decompose()
 
 
-def _inline_styles(soup: BeautifulSoup) -> None:
-    for tag, style in STYLE_MAP.items():
-        for element in soup.find_all(tag):
-            element["style"] = style
+def _text_with_inline_styles(node) -> str:
+    parts: list[str] = []
+    for child in getattr(node, "contents", []):
+        if getattr(child, "name", None) is None:
+            parts.append(escape(str(child)))
+            continue
+        if child.name == "strong":
+            parts.append(f'<strong style="{STRONG_STYLE}">{_text_with_inline_styles(child)}</strong>')
+        elif child.name == "em":
+            parts.append(f'<span style="font-style:normal;color:#475569;">{_text_with_inline_styles(child)}</span>')
+        elif child.name == "code":
+            parts.append(f'<span style="font-family:Menlo,Consolas,monospace;background:#f1f5f9;border-radius:4px;padding:2px 4px;font-size:14px;">{_text_with_inline_styles(child)}</span>')
+        elif child.name == "br":
+            parts.append("<br/>")
+        elif child.name == "a":
+            parts.append(f'<span style="color:#2563eb;">{_text_with_inline_styles(child)}</span>')
+        else:
+            parts.append(_text_with_inline_styles(child))
+    return "".join(parts)
+
+
+def _paragraph_html(inner: str, style: str = PARAGRAPH_STYLE) -> str:
+    inner = (inner or "").strip()
+    if not inner:
+        return ""
+    return f'<p style="{style}">{inner}</p>'
+
+
+def _heading_html(text: str, level: str = "h3") -> str:
+    style = H2_STYLE if level == "h2" else H3_STYLE
+    return f'<section style="{style}">{text}</section>'
+
+
+def _blockquote_html(node) -> str:
+    paragraphs = []
+    for child in node.find_all(["p", "li"], recursive=False):
+        text = _text_with_inline_styles(child).strip()
+        if text:
+            paragraphs.append(f'<p style="margin:0 0 8px;line-height:1.8;color:#475569;font-size:15px;">{text}</p>')
+    if not paragraphs:
+        text = _text_with_inline_styles(node).strip()
+        if text:
+            paragraphs.append(f'<p style="margin:0;line-height:1.8;color:#475569;font-size:15px;">{text}</p>')
+    return f'<section style="{BLOCKQUOTE_STYLE}">{"".join(paragraphs)}</section>' if paragraphs else ""
+
+
+def _list_html(node, ordered: bool = False) -> list[str]:
+    rows: list[str] = []
+    for index, li in enumerate(node.find_all("li", recursive=False), start=1):
+        text = _text_with_inline_styles(li).strip()
+        if not text:
+            continue
+        marker = f"{index}." if ordered else "•"
+        rows.append(
+            '<p style="margin:0 0 12px;line-height:1.85;color:#1f2937;font-size:16px;text-align:left;">'
+            f'<span style="display:inline-block;width:1.8em;color:#2563eb;font-weight:700;">{marker}</span>'
+            f'<span>{text}</span></p>'
+        )
+    return rows
+
+
+def _table_html(node) -> str:
+    rows: list[str] = []
+    for tr in node.find_all("tr"):
+        cells = [_text_with_inline_styles(cell).strip() for cell in tr.find_all(["th", "td"], recursive=False)]
+        if cells:
+            rows.append(" ｜ ".join(cell for cell in cells if cell))
+    if not rows:
+        return ""
+    body = "<br/>".join(rows)
+    return f'<section style="margin:18px 0;padding:12px 14px;background:#f8fafc;border-radius:8px;color:#334155;font-size:14px;line-height:1.8;">{body}</section>'
+
+
+def _wechat_compatible_html(soup: BeautifulSoup) -> str:
+    blocks: list[str] = []
+    for node in list(soup.contents):
+        name = getattr(node, "name", None)
+        if name is None:
+            text = escape(str(node).strip())
+            if text:
+                blocks.append(_paragraph_html(text))
+            continue
+        if name == "h1":
+            continue
+        if name == "h2":
+            blocks.append(_heading_html(_text_with_inline_styles(node), "h2"))
+        elif name == "h3":
+            blocks.append(_heading_html(_text_with_inline_styles(node), "h3"))
+        elif name in {"h4", "h5", "h6"}:
+            blocks.append(_heading_html(_text_with_inline_styles(node), "h3"))
+        elif name == "p":
+            imgs = node.find_all("img", recursive=False)
+            text_without_images = BeautifulSoup(str(node), "html.parser")
+            for img in text_without_images.find_all("img"):
+                img.decompose()
+            text_part = _text_with_inline_styles(text_without_images).strip()
+            if text_part:
+                blocks.append(_paragraph_html(text_part))
+            for img in imgs:
+                src = (img.get("src") or "").strip()
+                alt = escape((img.get("alt") or "文章配图").strip(), quote=True)
+                if src:
+                    blocks.append(f'<p style="margin:22px 0;text-align:center;"><img alt="{alt}" src="{src}" style="{IMG_STYLE}"/></p>')
+        elif name == "img":
+            src = (node.get("src") or "").strip()
+            alt = escape((node.get("alt") or "文章配图").strip(), quote=True)
+            if src:
+                blocks.append(f'<p style="margin:22px 0;text-align:center;"><img alt="{alt}" src="{src}" style="{IMG_STYLE}"/></p>')
+        elif name == "blockquote":
+            html = _blockquote_html(node)
+            if html:
+                blocks.append(html)
+        elif name == "ul":
+            blocks.extend(_list_html(node, ordered=False))
+        elif name == "ol":
+            blocks.extend(_list_html(node, ordered=True))
+        elif name == "hr":
+            blocks.append('<section style="margin:28px 0;border-top:1px solid #e5e7eb;height:1px;line-height:1px;overflow:hidden;"></section>')
+        elif name == "table":
+            html = _table_html(node)
+            if html:
+                blocks.append(html)
+        elif name == "pre":
+            text = escape(node.get_text("\n", strip=True))
+            if text:
+                blocks.append(f'<section style="white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin:16px 0;font-size:14px;line-height:1.7;color:#334155;">{text}</section>')
+        else:
+            text = _text_with_inline_styles(node).strip()
+            if text:
+                blocks.append(_paragraph_html(text))
+    return "".join(blocks)
 
 
 def _read_markdown(path: Path) -> str:
@@ -197,8 +308,7 @@ def _markdown_to_payload_html(
         img["alt"] = img.get("alt") or f"文章配图{len(images) + 1}"
         images.append(_image_payload(image_path, placeholder=placeholder))
 
-    _inline_styles(soup)
-    article_html = f'<section style="{ARTICLE_STYLE}">{soup.decode()}</section>'
+    article_html = f'<section style="{ARTICLE_STYLE}">{_wechat_compatible_html(soup)}</section>'
     return article_html, images, cover_path
 
 

@@ -19,6 +19,7 @@ from .db import (
     persist_draft_record,
     update_draft_review,
 )
+from .content_filters import is_blocked_source_image_url, is_newslike_text
 from .fetchers import fetch_article
 from .llm import archive_draft, generate_wechat_draft, review_wechat_draft
 from .tophub import scrape_tophub_news
@@ -27,55 +28,44 @@ from .tophub import scrape_tophub_news
 ProgressCallback = Callable[[str, str], None]
 
 
-NEWSLIKE_KEYWORDS = (
-    "通报",
-    "公告",
-    "发布会",
-    "新华社",
-    "央视新闻",
-    "新闻联播",
-    "快讯",
-    "突发",
-    "据报道",
-    "据悉",
-    "回应称",
-    "官方回应",
-    "警方",
-    "法院",
-    "检方",
-    "判决",
-    "调查组",
-    "监管",
-    "处罚",
-    "政策",
-    "条例",
-    "会议",
-    "声明",
-)
-
-NEWSLIKE_HARD_KEYWORDS = (
-    "新华社",
-    "央视新闻",
-    "新闻联播",
-    "发布会",
-    "官方通报",
-    "警方通报",
-    "情况通报",
-    "快讯",
-)
-
-
 def _emit(progress_cb: ProgressCallback | None, level: str, message: str) -> None:
     if progress_cb:
         progress_cb(level, message)
 
 
 def _is_newslike_text(title: str, summary: str = "", content: str = "") -> bool:
-    text = f"{title or ''} {summary or ''} {(content or '')[:800]}"
-    if any(keyword in text for keyword in NEWSLIKE_HARD_KEYWORDS):
-        return True
-    score = sum(1 for keyword in NEWSLIKE_KEYWORDS if keyword in text)
-    return score >= 2
+    return is_newslike_text(title=title, summary=summary, content=content)
+
+
+def _is_newslike_item(item: dict) -> bool:
+    return is_newslike_text(
+        title=item.get("title") or item.get("member_title") or "",
+        summary=item.get("summary") or "",
+        content=item.get("content_text") or "",
+        source_url=item.get("source_url") or item.get("final_url") or "",
+        source_host=item.get("source_host") or "",
+        board_name=item.get("board_name") or "",
+    )
+
+
+def _filter_newslike_scrape_items(result) -> int:
+    """在入库前过滤明显新闻、通稿、官方发布类热点条目。"""
+
+    skipped = 0
+    for board in result.boards:
+        kept_items = []
+        for item in board.items:
+            if is_newslike_text(
+                title=item.title,
+                summary=item.raw_text,
+                source_url=item.source_url,
+                board_name=board.board_name,
+            ):
+                skipped += 1
+                continue
+            kept_items.append(item)
+        board.items = kept_items
+    return skipped
 
 
 def _filter_newslike_clusters(clusters: list[dict], progress_cb: ProgressCallback | None = None) -> tuple[list[dict], int]:
@@ -86,10 +76,19 @@ def _filter_newslike_clusters(clusters: list[dict], progress_cb: ProgressCallbac
         summary = cluster.get("cluster_summary") or ""
         sources = cluster.get("sources") or []
         source_text = " ".join(
-            f"{source.get('title') or source.get('member_title') or ''} {source.get('summary') or ''}"
+            (
+                f"{source.get('board_name') or ''} "
+                f"{source.get('title') or source.get('member_title') or ''} "
+                f"{source.get('summary') or ''} "
+                f"{source.get('content_text') or ''} "
+                f"{source.get('source_url') or ''} "
+                f"{source.get('source_host') or ''}"
+            )
             for source in sources[:4]
         )
-        if _is_newslike_text(title, summary, source_text):
+        if is_newslike_text(title=title, summary=summary, content=source_text) or any(
+            _is_newslike_item(source) for source in sources[:6]
+        ):
             skipped += 1
             _emit(progress_cb, "info", f"跳过新闻类选题：{title[:60]}")
             continue
@@ -124,6 +123,8 @@ def _collect_draft_images(cluster: dict, image_config: dict) -> list[str]:
         deduped: list[str] = []
         seen = set()
         for image_url in source.get("image_urls") or []:
+            if is_blocked_source_image_url(image_url):
+                continue
             if image_url and image_url not in seen:
                 deduped.append(image_url)
                 seen.add(image_url)
@@ -160,12 +161,19 @@ def _collect_draft_images(cluster: dict, image_config: dict) -> list[str]:
 def run_scrape(settings: Settings, progress_cb: ProgressCallback | None = None) -> dict:
     _emit(progress_cb, "info", "开始抓取 TopHub 新闻页")
     result = scrape_tophub_news(settings)
+    runtime_config = load_runtime_config(settings)
+    skipped_newslike = 0
+    if runtime_config.get("content_filter", {}).get("exclude_newslike", True):
+        skipped_newslike = _filter_newslike_scrape_items(result)
+        if skipped_newslike:
+            _emit(progress_cb, "info", f"入库前已过滤新闻/通稿类热点条目：{skipped_newslike} 条")
     summary = persist_scrape_result(settings, result)
     payload = {
         "page_url": result.page_url,
         "status_code": result.status_code,
         "raw_html_path": result.raw_html_path,
         "html_sha256": result.html_sha256,
+        "skipped_newslike": skipped_newslike,
         **summary,
     }
     _emit(
@@ -200,10 +208,10 @@ def run_article_enrichment(settings: Settings, limit: int = 20, progress_cb: Pro
     pending_items = fetch_unfetched_cluster_items(settings, limit=limit)
     if filter_newslike:
         before_count = len(pending_items)
-        pending_items = [item for item in pending_items if not _is_newslike_text(item.get("title") or "")]
+        pending_items = [item for item in pending_items if not _is_newslike_item(item)]
         skipped_by_title = before_count - len(pending_items)
         if skipped_by_title:
-            _emit(progress_cb, "info", f"已过滤新闻类待补抓条目：{skipped_by_title} 条")
+            _emit(progress_cb, "info", f"已过滤新闻/通稿类待补抓条目：{skipped_by_title} 条")
     processed = 0
     fetched = 0
     blocked = 0
@@ -227,7 +235,14 @@ def run_article_enrichment(settings: Settings, limit: int = 20, progress_cb: Pro
         )
         persist_article_fetch_result(settings, result)
         processed += 1
-        if filter_newslike and _is_newslike_text(result.title or item["title"], result.summary, result.content_text):
+        if filter_newslike and is_newslike_text(
+            title=result.title or item["title"],
+            summary=result.summary,
+            content=result.content_text,
+            source_url=result.final_url or result.source_url,
+            source_host=result.source_host,
+            board_name=result.board_name,
+        ):
             skipped += 1
             _emit(
                 progress_cb,

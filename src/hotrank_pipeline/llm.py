@@ -9,7 +9,9 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
+from PIL import Image, UnidentifiedImageError
 
+from .content_filters import is_blocked_source_image_url, is_unusable_image_dimensions
 
 GENERIC_HEADING_MAP = {
     "导语",
@@ -352,14 +354,22 @@ def _build_image_prompts(
             prompt = _render_prompt_template(prompt_template, context)
         else:
             prompt = (
-                "为一篇中文微信公众号文章生成原创插图。"
+                "为一篇中文微信公众号文章生成原创配图，必须是高真实感摄影，不要插画、不要海报、不要AI概念图。"
                 f"文章标题：{context['article_title']}。"
                 f"插图位置：第 {context['image_index']} 张 / 共 {context['image_count']} 张。"
                 f"小节主题：{context['section_title']}。"
                 f"内容摘要：{context['section_excerpt']}。"
-                "画面要求：现代中文媒体插画风，真实但不过度新闻摄影感，构图干净，有情绪和信息量，"
-                "适合手机端公众号阅读；不要出现任何文字、标题、logo、水印、二维码、品牌商标；"
-                "不要直接生成真实公众人物脸部特写，避免血腥、事故现场和惊悚画面。"
+                "画面内容：用真实生活场景、真实物件、普通人背影/手部/侧影或环境细节来表达主题，"
+                "不要做夸张隐喻，不要漂浮图标，不要把标题文字画进图片。"
+                "摄影风格：photorealistic editorial documentary photography, real-world location, natural light,"
+                " candid composition, 35mm or 50mm lens look, realistic skin texture, realistic colors,"
+                " imperfect everyday details, moderate depth of field, like a licensed editorial stock photo."
+                "构图要求：适合公众号手机端阅读，主体清晰，背景真实但不杂乱，画面留有呼吸感，可裁切为方图。"
+                "严格避免：illustration, cartoon, anime, CGI, 3D render, digital art, glossy advertising poster,"
+                " plastic skin, over-saturated colors, perfect symmetrical fake faces, surreal objects,"
+                " text, title, logo, watermark, QR code, brand trademark."
+                "安全边界：不要生成真实公众人物可识别脸部；涉及事故、疾病、公共事件、金融风险时，"
+                "用间接场景表达，避免血腥、事故现场、惊悚画面和可能误导为真实新闻照片的具体人物。"
             )
         prompts.append(prompt)
 
@@ -681,12 +691,16 @@ def _download_images(image_urls: list[str], month_dir: Path, stem_name: str) -> 
     for idx, image_url in enumerate(image_urls, start=1):
         if image_url in seen:
             continue
+        if is_blocked_source_image_url(image_url):
+            continue
         seen.add(image_url)
         try:
             response = requests.get(image_url, timeout=40)
             response.raise_for_status()
             content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
             if not content_type.startswith("image/") and "octet-stream" not in content_type:
+                continue
+            if _is_unusable_downloaded_image(response.content, image_url):
                 continue
             ext = _guess_extension(content_type, image_url, response.content)
             target = asset_dir / f"img_{idx:02d}{ext}"
@@ -696,6 +710,21 @@ def _download_images(image_urls: list[str], month_dir: Path, stem_name: str) -> 
         except Exception:
             continue
     return saved_paths
+
+
+def _is_unusable_downloaded_image(body: bytes, url: str = "") -> bool:
+    if not body or len(body) < 8 * 1024:
+        return True
+    if is_blocked_source_image_url(url):
+        return True
+    try:
+        from io import BytesIO
+
+        with Image.open(BytesIO(body)) as image:
+            width, height = image.size
+    except (UnidentifiedImageError, OSError, ValueError):
+        return True
+    return is_unusable_image_dimensions(width, height, url)
 
 
 def _generate_ai_images(

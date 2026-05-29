@@ -11,9 +11,11 @@ TopHub 新闻页热点抓取与公众号草稿生成项目，使用本地 Postgr
 - 对白名单榜单做热点聚类
 - 对热点条目做原文补抓 / 摘要抽取
 - 调用 `mimo-v2.5` 生成公众号初稿
-- 自动下载并插入多张配图到 Markdown 初稿
-  - 优先使用正文来源图片（如澎湃）
+- 自动生成并插入多张配图到 Markdown 初稿
+  - 优先生图模型生成真实摄影风格配图，失败后再回退正文来源图片
+  - 回退取图会过滤新闻源图片、logo、水印、二维码、关注引导横幅、小尺寸横幅图
   - 支持限制“每篇最多插图数 / 单来源最多取图数”
+- 默认过滤新华社、央视新闻、人民日报、中国新闻网等新闻通稿 / 官方通报 / 快讯类条目，优先保留适合公众号二创解读的选题
 - 支持把已生成初稿一键上传到微信公众号草稿箱
   - 草稿 JSON 使用 UTF-8 直传，避免中文在公众号后台显示成 `\uXXXX`
   - Markdown 会转换成公众号友好的内联 HTML 样式，并自动上传封面与正文插图
@@ -29,6 +31,7 @@ TopHub 新闻页热点抓取与公众号草稿生成项目，使用本地 Postgr
 - `src/hotrank_pipeline/db.py`：数据库初始化与入库
 - `src/hotrank_pipeline/clustering.py`：热点聚类逻辑
 - `src/hotrank_pipeline/fetchers.py`：正文补抓与摘要抽取
+- `src/hotrank_pipeline/content_filters.py`：新闻通稿与不可用图片过滤规则
 - `src/hotrank_pipeline/llm.py`：OpenAI 兼容 LLM 调用
 - `src/hotrank_pipeline/wechat_publisher.py`：微信公众号草稿箱推送
 - `src/hotrank_pipeline/services.py`：业务流程编排

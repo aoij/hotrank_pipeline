@@ -8,6 +8,7 @@ import requests
 from bs4 import BeautifulSoup
 from readability import Document
 
+from .content_filters import is_blocked_image_context, is_blocked_source_image_url
 from .models import ArticleFetchResult
 
 
@@ -71,6 +72,8 @@ def _is_probable_content_image(url: str) -> bool:
     lowered = url.lower()
     if not url or lowered.startswith("data:"):
         return False
+    if is_blocked_source_image_url(url):
+        return False
     if any(
         token in lowered
         for token in [
@@ -96,8 +99,10 @@ def _is_probable_content_image(url: str) -> bool:
 def _collect_image_urls(soup: BeautifulSoup, base_url: str, max_images: int = 12) -> list[str]:
     candidates: list[str] = []
 
-    def add_candidate(raw_url: str | None) -> None:
+    def add_candidate(raw_url: str | None, context: str = "") -> None:
         if not raw_url:
+            return
+        if is_blocked_image_context(context):
             return
         full = urljoin(base_url, raw_url.strip())
         if not _is_probable_content_image(full):
@@ -112,16 +117,20 @@ def _collect_image_urls(soup: BeautifulSoup, base_url: str, max_images: int = 12
     ]:
         node = soup.find("meta", attrs={attr: key})
         if node and node.get("content"):
-            add_candidate(node.get("content"))
+            add_candidate(node.get("content"), node.get("content") or "")
 
     for img in soup.find_all("img"):
+        context = " ".join(
+            str(img.get(field) or "")
+            for field in ("alt", "title", "aria-label", "data-caption", "data-alt")
+        )
         for field in ("src", "data-src", "data-original", "data-actualsrc", "srcset"):
             value = img.get(field)
             if not value:
                 continue
             if field == "srcset":
                 value = value.split(",")[0].strip().split(" ")[0]
-            add_candidate(value)
+            add_candidate(value, context)
 
     return candidates[:max_images]
 
@@ -137,6 +146,8 @@ def _filter_image_urls(
 
     for url in image_urls:
         lowered = url.lower()
+        if is_blocked_source_image_url(url):
+            continue
         if board_name == "百度" and any(
             token in lowered
             for token in [
