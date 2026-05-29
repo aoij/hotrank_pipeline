@@ -5,6 +5,7 @@ TopHub 新闻页热点抓取与公众号草稿生成项目，使用本地 Postgr
 ## 当前实现范围
 
 - 抓取 `https://tophub.today/c/news?p=1`
+- 支持扩展内容源：DailyHot API、RSSHub / 普通 RSS
 - 解析每个榜单卡片与榜单条目
 - 保存原始 HTML 到本地
 - 入库到本地 PostgreSQL
@@ -28,6 +29,7 @@ TopHub 新闻页热点抓取与公众号草稿生成项目，使用本地 Postgr
 - `run.py`：命令行入口
 - `src/hotrank_pipeline/main.py`：CLI
 - `src/hotrank_pipeline/tophub.py`：抓取与解析逻辑
+- `src/hotrank_pipeline/multi_source.py`：DailyHot / RSSHub / RSS 扩展内容源适配
 - `src/hotrank_pipeline/db.py`：数据库初始化与入库
 - `src/hotrank_pipeline/clustering.py`：热点聚类逻辑
 - `src/hotrank_pipeline/fetchers.py`：正文补抓与摘要抽取
@@ -73,6 +75,14 @@ python .\run.py init-db
 cd C:\ai_work\hotrank_pipeline
 python .\run.py scrape-news
 ```
+
+抓取会按 Web 配置页的“内容源配置”执行：
+
+- `TopHub`：默认保留，用于兼容现有流程。
+- `DailyHot API`：填写自建 API 地址后，按 route 抓取，例如 `weibo`、`zhihu`、`bilibili`、`36kr`。
+- `RSS / RSSHub`：每行配置一个源，格式为 `名称|URL`；也可以只填 URL。
+
+扩展源抓到的数据会写入同一套 PostgreSQL 表，后续仍复用聚类、正文补抓、成稿、评分、公众号草稿箱推送流程。
 
 ## 执行热点聚类
 
