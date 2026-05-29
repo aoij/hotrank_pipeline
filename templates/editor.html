@@ -77,6 +77,14 @@
       border-color: #2563eb;
       color: #fff;
     }
+    .btn-link.danger {
+      background: #fff;
+      border-color: #fecaca;
+      color: #dc2626;
+    }
+    .btn-link.danger:hover {
+      background: #fef2f2;
+    }
 
     .btn-link:disabled,
     .btn-link.is-loading {
@@ -227,6 +235,48 @@
       margin-top: 12px;
       max-height: 760px;
       overflow: auto;
+    }
+    .draft-bulk-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+      padding: 10px;
+      border-radius: 14px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      color: var(--sub);
+      font-size: 12px;
+    }
+    .draft-bulk-bar label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .draft-bulk-bar button {
+      min-height: 34px;
+      padding: 0 11px;
+      border-radius: 10px;
+      border: 1px solid #fecaca;
+      background: #fff;
+      color: #dc2626;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .draft-row {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+    }
+    .draft-check {
+      margin-top: 18px;
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
     }
     .draft-item {
       display: block;
@@ -496,6 +546,11 @@
           {% elif request.query_params.get('wechat_publish') == 'failed' %}
           <div class="publish-notice failed">推送微信公众号草稿箱失败，请查看控制台执行日志。{% if request.query_params.get('error') %}<br>{{ request.query_params.get('error') }}{% endif %}</div>
           {% endif %}
+          {% if request.query_params.get('delete') == 'success' %}
+          <div class="publish-notice">稿件已删除，数据库记录和本地归档文件已同步清理。</div>
+          {% elif request.query_params.get('delete') == 'missing' %}
+          <div class="publish-notice failed">未找到要删除的稿件，可能已被删除。</div>
+          {% endif %}
           <form method="post" action="/editor/{{ source_id }}/publish-wechat" style="margin-top: 12px;" id="publishWechatForm">
             <button class="btn-link primary" type="submit" style="width: 100%; cursor: pointer;" id="publishWechatBtn">推送到微信公众号草稿箱</button>
           </form>
@@ -505,31 +560,46 @@
             <button class="btn-link" type="submit" style="width: 100%; cursor: pointer;" id="regenerateImagesBtn">重新生成插图</button>
           </form>
           <div class="copy-tip" style="margin: 10px 0 0;">会删除当前稿件中的 Markdown 图片引用，并按当前生图配置重新生成插图；如果生图失败，会按配置回退原文取图。</div>
+
+          <form method="post" action="/editor/{{ source_id }}/delete" style="margin-top: 12px;" id="deleteCurrentDraftForm">
+            <button class="btn-link danger" type="submit" style="width: 100%; cursor: pointer;">删除当前稿件</button>
+          </form>
+          <div class="copy-tip" style="margin: 10px 0 0;">删除会同步移除数据库记录、本地 Markdown 文件和对应配图目录；操作不可撤销。</div>
           {% endif %}
 
           <div style="margin-top: 20px; font-size: 13px; color: var(--sub); font-weight: 700;">最近稿件（高分优先）</div>
+          <form method="post" action="/editor/delete-drafts" id="bulkDeleteForm">
+            {% if source_id %}<input type="hidden" name="current_draft_id" value="{{ source_id }}">{% endif %}
+            <div class="draft-bulk-bar">
+              <label><input type="checkbox" id="selectAllDrafts"> 全选</label>
+              <button type="submit" id="bulkDeleteBtn">删除选中</button>
+              <span id="selectedCount">已选 0 篇</span>
+            </div>
           <div class="draft-list">
             {% if drafts %}
               {% for draft in drafts %}
-              <a class="draft-item" href="/editor?draft_id={{ draft.id }}">
-                <div class="draft-topline">
-                  <h3>{{ draft.title }}</h3>
-                  {% if draft.review_score is not none %}
-                  <span class="score-pill">{{ '%.1f'|format(draft.review_score) }} 分</span>
-                  {% else %}
-                  <span class="score-pill unscored">未评分</span>
+              <div class="draft-row">
+                <input class="draft-check" type="checkbox" name="draft_ids" value="{{ draft.id }}" aria-label="选择稿件 {{ draft.title }}">
+                <a class="draft-item" href="/editor?draft_id={{ draft.id }}">
+                  <div class="draft-topline">
+                    <h3>{{ draft.title }}</h3>
+                    {% if draft.review_score is not none %}
+                    <span class="score-pill">{{ '%.1f'|format(draft.review_score) }} 分</span>
+                    {% else %}
+                    <span class="score-pill unscored">未评分</span>
+                    {% endif %}
+                  </div>
+                  <div class="meta">
+                    <div>ID：{{ draft.id }}｜时间：{{ draft.created_at_text }}</div>
+                    <div>模型：{{ draft.model_name }}</div>
+                    {% if draft.reviewed_at_text %}<div>评分时间：{{ draft.reviewed_at_text }}</div>{% endif %}
+                    <div>归档：{{ draft.archive_path }}</div>
+                  </div>
+                  {% if draft.review_summary %}
+                  <div class="review-summary">{{ draft.review_summary }}</div>
                   {% endif %}
+                </a>
                 </div>
-                <div class="meta">
-                  <div>时间：{{ draft.created_at_text }}</div>
-                  <div>模型：{{ draft.model_name }}</div>
-                  {% if draft.reviewed_at_text %}<div>评分时间：{{ draft.reviewed_at_text }}</div>{% endif %}
-                  <div>归档：{{ draft.archive_path }}</div>
-                </div>
-                {% if draft.review_summary %}
-                <div class="review-summary">{{ draft.review_summary }}</div>
-                {% endif %}
-              </a>
               {% endfor %}
             {% else %}
               <div class="draft-item">
@@ -538,6 +608,7 @@
               </div>
             {% endif %}
           </div>
+          </form>
         </div>
       </aside>
 
@@ -618,6 +689,11 @@
     const publishWechatForm = document.getElementById("publishWechatForm");
     const publishWechatBtn = document.getElementById("publishWechatBtn");
     const publishOverlay = document.getElementById("publishOverlay");
+    const deleteCurrentDraftForm = document.getElementById("deleteCurrentDraftForm");
+    const bulkDeleteForm = document.getElementById("bulkDeleteForm");
+    const selectAllDrafts = document.getElementById("selectAllDrafts");
+    const selectedCount = document.getElementById("selectedCount");
+    const bulkDeleteBtn = document.getElementById("bulkDeleteBtn");
     const assetBasePath = {{ (asset_base_path or '') | tojson }};
 
     let renderTimer = null;
@@ -683,6 +759,53 @@
         publishWechatBtn.textContent = "正在推送，请稍候...";
         publishOverlay.classList.add("show");
         publishOverlay.setAttribute("aria-hidden", "false");
+      });
+    }
+
+    function selectedDraftChecks() {
+      return Array.from(document.querySelectorAll(".draft-check:checked"));
+    }
+
+    function updateSelectedCount() {
+      const count = selectedDraftChecks().length;
+      if (selectedCount) selectedCount.textContent = `已选 ${count} 篇`;
+      if (bulkDeleteBtn) bulkDeleteBtn.disabled = count === 0;
+    }
+
+    document.querySelectorAll(".draft-check").forEach((checkbox) => {
+      checkbox.addEventListener("change", updateSelectedCount);
+      checkbox.addEventListener("click", (event) => event.stopPropagation());
+    });
+
+    if (selectAllDrafts) {
+      selectAllDrafts.addEventListener("change", () => {
+        document.querySelectorAll(".draft-check").forEach((checkbox) => {
+          checkbox.checked = selectAllDrafts.checked;
+        });
+        updateSelectedCount();
+      });
+    }
+
+    if (bulkDeleteForm) {
+      bulkDeleteForm.addEventListener("submit", (event) => {
+        const count = selectedDraftChecks().length;
+        if (count === 0) {
+          event.preventDefault();
+          alert("请先选择要删除的文章。");
+          return;
+        }
+        if (!confirm(`确认删除选中的 ${count} 篇文章吗？\\n会同步删除数据库记录、本地 Markdown 文件和对应配图目录，操作不可撤销。`)) {
+          event.preventDefault();
+        }
+      });
+      updateSelectedCount();
+    }
+
+    if (deleteCurrentDraftForm) {
+      deleteCurrentDraftForm.addEventListener("submit", (event) => {
+        if (!confirm("确认删除当前文章吗？\\n会同步删除数据库记录、本地 Markdown 文件和对应配图目录，操作不可撤销。")) {
+          event.preventDefault();
+        }
       });
     }
 
