@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .config import get_settings, load_runtime_config, mask_secret, save_runtime_config
-from .db import fetch_draft_by_id, fetch_recent_drafts, update_draft_content
+from .db import delete_drafts_by_ids, fetch_draft_by_id, fetch_recent_drafts, update_draft_content
 from .llm import regenerate_draft_images_file
 from .multi_source import merged_multi_source_config, parse_lines, parse_rss_feed_lines, rss_feeds_to_text
 from .runtime_log import append_runtime_log, latest_notice, read_runtime_logs
@@ -203,6 +203,38 @@ def _safe_resolve_local_path(path_value: str) -> Path:
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
     return path
+
+
+def _cleanup_draft_files(deleted_rows: list[dict]) -> dict[str, int]:
+    removed_files = 0
+    removed_dirs = 0
+    skipped = 0
+    for row in deleted_rows:
+        archive_path = (row.get("archive_path") or "").strip()
+        if not archive_path:
+            skipped += 1
+            continue
+        try:
+            target = _safe_resolve_local_path(archive_path)
+        except HTTPException:
+            skipped += 1
+            continue
+        stem_name = target.stem
+        asset_dir = target.parent / "assets" / stem_name
+        try:
+            target.unlink(missing_ok=True)
+            removed_files += 1
+        except OSError:
+            skipped += 1
+        try:
+            if asset_dir.exists() and asset_dir.is_dir() and _is_within_allowed_roots(asset_dir):
+                import shutil
+
+                shutil.rmtree(asset_dir)
+                removed_dirs += 1
+        except OSError:
+            skipped += 1
+    return {"removed_files": removed_files, "removed_dirs": removed_dirs, "skipped": skipped}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -526,6 +558,41 @@ def render_html_document(content: str = Form(...), asset_base_path: str = Form("
         _render_markdown_to_wechat_html_document(content, asset_base_dir=asset_base_dir),
         media_type="text/html; charset=utf-8",
     )
+
+
+@app.post("/editor/delete-drafts")
+def delete_editor_drafts(draft_ids: list[int] = Form(default=[]), current_draft_id: int | None = Form(default=None)):
+    ids = sorted({int(draft_id) for draft_id in draft_ids if int(draft_id) > 0})
+    if not ids:
+        return RedirectResponse(url="/editor?delete=none", status_code=303)
+    deleted_rows = delete_drafts_by_ids(settings, ids)
+    cleanup = _cleanup_draft_files(deleted_rows)
+    append_runtime_log(
+        "success" if len(deleted_rows) == len(ids) else "warning",
+        (
+            f"删除稿件完成：请求 {len(ids)} 篇｜删除记录 {len(deleted_rows)} 篇｜"
+            f"文件 {cleanup['removed_files']} 个｜配图目录 {cleanup['removed_dirs']} 个｜跳过 {cleanup['skipped']} 项"
+        ),
+    )
+    remaining_current = current_draft_id and int(current_draft_id) not in ids
+    if remaining_current:
+        return RedirectResponse(url=f"/editor?draft_id={int(current_draft_id)}&delete=success", status_code=303)
+    return RedirectResponse(url="/editor?delete=success", status_code=303)
+
+
+@app.post("/editor/{draft_id}/delete")
+def delete_editor_draft(draft_id: int):
+    deleted_rows = delete_drafts_by_ids(settings, [draft_id])
+    cleanup = _cleanup_draft_files(deleted_rows)
+    level = "success" if deleted_rows else "warning"
+    append_runtime_log(
+        level,
+        (
+            f"删除稿件：draft_id={draft_id}｜删除记录 {len(deleted_rows)} 篇｜"
+            f"文件 {cleanup['removed_files']} 个｜配图目录 {cleanup['removed_dirs']} 个"
+        ),
+    )
+    return RedirectResponse(url="/editor?delete=success" if deleted_rows else "/editor?delete=missing", status_code=303)
 
 
 @app.post("/editor/{draft_id}/regenerate-images")
