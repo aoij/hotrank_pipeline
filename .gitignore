@@ -7,3 +7,4 @@ data/raw/*.html
 data/runtime_logs/
 data/dingtalk_*.md
 *.log
+data/raw/multi_sources_*.json
