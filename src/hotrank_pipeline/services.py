@@ -22,6 +22,7 @@ from .db import (
 from .content_filters import is_blocked_source_image_url, is_newslike_text
 from .fetchers import fetch_article
 from .llm import archive_draft, generate_wechat_draft, review_wechat_draft
+from .multi_source import scrape_configured_sources
 from .tophub import scrape_tophub_news
 
 
@@ -159,27 +160,76 @@ def _collect_draft_images(cluster: dict, image_config: dict) -> list[str]:
 
 
 def run_scrape(settings: Settings, progress_cb: ProgressCallback | None = None) -> dict:
-    _emit(progress_cb, "info", "开始抓取 TopHub 新闻页")
-    result = scrape_tophub_news(settings)
     runtime_config = load_runtime_config(settings)
+    source_config = runtime_config.get("content_sources") or {}
+    include_tophub = source_config.get("include_tophub", True)
+    multi_enabled = bool(source_config.get("enabled", False))
+    results = []
+
+    if include_tophub:
+        _emit(progress_cb, "info", "开始抓取 TopHub 新闻页")
+        results.append(scrape_tophub_news(settings))
+
+    if multi_enabled:
+        _emit(progress_cb, "info", "开始抓取扩展内容源：DailyHot / RSS")
+        multi_result = scrape_configured_sources(settings, runtime_config)
+        if multi_result.boards:
+            results.append(multi_result)
+            _emit(
+                progress_cb,
+                "info",
+                f"扩展内容源抓取完成：boards={len(multi_result.boards)} items={sum(len(board.items) for board in multi_result.boards)}",
+            )
+        else:
+            _emit(progress_cb, "warning", "扩展内容源未抓到可用数据，请检查 DailyHot 地址或 RSS 配置。")
+
+    if not results:
+        _emit(progress_cb, "info", "未启用任何内容源，默认回退抓取 TopHub 新闻页")
+        results.append(scrape_tophub_news(settings))
+
+    total_board_count = 0
+    total_item_count = 0
+    total_skipped_newslike = 0
+    run_count = 0
+    raw_paths = []
+    status_code = 200
+    page_urls = []
+
     skipped_newslike = 0
-    if runtime_config.get("content_filter", {}).get("exclude_newslike", True):
-        skipped_newslike = _filter_newslike_scrape_items(result)
-        if skipped_newslike:
-            _emit(progress_cb, "info", f"入库前已过滤新闻/通稿类热点条目：{skipped_newslike} 条")
-    summary = persist_scrape_result(settings, result)
+    filter_newslike = runtime_config.get("content_filter", {}).get("exclude_newslike", True)
+
+    for result in results:
+        skipped_newslike = 0
+        if filter_newslike:
+            skipped_newslike = _filter_newslike_scrape_items(result)
+            if skipped_newslike:
+                _emit(progress_cb, "info", f"{result.source_name} 入库前已过滤新闻/通稿类热点条目：{skipped_newslike} 条")
+        summary = persist_scrape_result(settings, result)
+        total_board_count += summary["board_count"]
+        total_item_count += summary["item_count"]
+        run_count += summary["run_count"]
+        total_skipped_newslike += skipped_newslike
+        raw_paths.append(result.raw_html_path)
+        page_urls.append(result.page_url)
+        status_code = result.status_code if result.status_code >= status_code else status_code
+
     payload = {
-        "page_url": result.page_url,
-        "status_code": result.status_code,
-        "raw_html_path": result.raw_html_path,
-        "html_sha256": result.html_sha256,
-        "skipped_newslike": skipped_newslike,
-        **summary,
+        "page_url": " | ".join(page_urls),
+        "status_code": status_code,
+        "raw_html_path": " | ".join(raw_paths),
+        "html_sha256": "",
+        "skipped_newslike": total_skipped_newslike,
+        "board_count": total_board_count,
+        "item_count": total_item_count,
+        "run_count": run_count,
     }
     _emit(
         progress_cb,
         "success",
-        f"抓取完成：boards={payload['board_count']} items={payload['item_count']} status={payload['status_code']}",
+        (
+            f"抓取完成：runs={payload['run_count']} boards={payload['board_count']} "
+            f"items={payload['item_count']} skipped_newslike={payload['skipped_newslike']}"
+        ),
     )
     return payload
 
