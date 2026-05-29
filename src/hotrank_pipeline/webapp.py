@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from .config import get_settings, load_runtime_config, mask_secret, save_runtime_config
 from .db import fetch_draft_by_id, fetch_recent_drafts, update_draft_content
 from .llm import regenerate_draft_images_file
+from .multi_source import merged_multi_source_config, parse_lines, parse_rss_feed_lines, rss_feeds_to_text
 from .runtime_log import append_runtime_log, latest_notice, read_runtime_logs
 from .services import (
     dashboard_payload,
@@ -207,6 +208,7 @@ def _safe_resolve_local_path(path_value: str) -> Path:
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, message: str | None = None, cluster_page: int = 1):
     runtime = load_runtime_config(settings)
+    content_sources = merged_multi_source_config(runtime)
     payload = dashboard_payload(settings, cluster_page=max(1, cluster_page), cluster_page_size=12)
     logs = read_runtime_logs(limit=80)
     notice = latest_notice(logs)
@@ -221,6 +223,8 @@ def index(request: Request, message: str | None = None, cluster_page: int = 1):
             "masked_image_api_key": mask_secret(
                 runtime.get("images", {}).get("generation", {}).get("api_key", "")
             ),
+            "content_sources": content_sources,
+            "rss_feeds_text": rss_feeds_to_text(content_sources.get("rss_feeds", [])),
             "runtime_logs": logs,
             "runtime_notice": notice,
             "recent_drafts": recent_drafts,
@@ -247,6 +251,12 @@ def update_config(
     image_prefer_ai_generated: str = Form(""),
     image_fallback_to_source: str = Form(""),
     content_filter_exclude_newslike: str = Form(""),
+    content_sources_enabled: str = Form(""),
+    content_sources_include_tophub: str = Form(""),
+    dailyhot_base_url: str = Form(""),
+    dailyhot_routes: str = Form(""),
+    rss_feeds: str = Form(""),
+    content_sources_max_items: int = Form(30),
     draft_output_dir: str = Form(...),
     board_whitelist: str = Form(...),
     image_max_per_draft: int = Form(6),
@@ -278,6 +288,14 @@ def update_config(
     runtime["images"]["generation"]["prompt_template"] = image_generation_prompt_template.strip()
     runtime.setdefault("content_filter", {})
     runtime["content_filter"]["exclude_newslike"] = content_filter_exclude_newslike == "on"
+    runtime["content_sources"] = {
+        "enabled": content_sources_enabled == "on",
+        "include_tophub": content_sources_include_tophub == "on",
+        "dailyhot_base_url": dailyhot_base_url.strip(),
+        "dailyhot_routes": parse_lines(dailyhot_routes),
+        "rss_feeds": parse_rss_feed_lines(rss_feeds),
+        "max_items_per_board": max(1, min(content_sources_max_items, 100)),
+    }
     runtime.setdefault("wechat_gateway", {})
     runtime["wechat_gateway"]["base_url"] = wechat_gateway_base_url.strip() or "http://106.12.11.147:18080"
     if wechat_gateway_token.strip():
