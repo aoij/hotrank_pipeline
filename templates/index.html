@@ -958,6 +958,36 @@
       overflow: hidden;
     }
 
+    .draft-card-mini .publish-meta {
+      margin-top: 6px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .publish-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+      border: 1px solid transparent;
+    }
+
+    .publish-chip.wechat {
+      background: #ecfdf3;
+      border-color: #bbf7d0;
+      color: #15803d;
+    }
+
+    .publish-chip.toutiao {
+      background: #fff1f2;
+      border-color: #fecdd3;
+      color: #e11d48;
+    }
+
     .cluster-meta {
       display: flex;
       flex-wrap: wrap;
@@ -1010,6 +1040,42 @@
       font-size: 12.5px;
       font-weight: 600;
       border: 1px solid #a7f3d0;
+    }
+
+    .log-action-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 34px;
+      padding: 0 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--text-sub);
+      font-size: 12.5px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all .18s ease;
+    }
+
+    .log-action-btn:hover {
+      background: #f8fafc;
+      border-color: var(--border-strong);
+    }
+
+    .log-action-btn.danger {
+      border-color: #fecaca;
+      color: #dc2626;
+      background: #fff;
+    }
+
+    .log-action-btn.danger:hover {
+      background: #fef2f2;
+    }
+
+    .log-action-btn:disabled {
+      cursor: wait;
+      opacity: .7;
     }
 
     .status-dot {
@@ -1196,6 +1262,7 @@
             </div>
             <div class="log-toolbar">
               <span class="status-pill"><span class="status-dot"></span><span id="logStatus">自动刷新中</span></span>
+              <button type="button" class="log-action-btn danger" id="clearLogsBtn">清除日志</button>
             </div>
           </div>
           <div class="log-panel-body">
@@ -1290,6 +1357,51 @@
               </form>
             </div>
 
+
+            <div class="action-card action-card-feature" style="margin-top: 14px;">
+              <div class="step-row">
+                <span class="step-num">话</span>
+                <h3>指定话题生成文章</h3>
+              </div>
+              <p>输入一个话题，系统会直接访问百度、Bing、知乎、微信等平台搜集创作灵感，再让模型辅助筛选资料、汇集信息，生成公众号初稿和配图。</p>
+              <form class="inline-form action-foot" method="post" action="/actions/manual-topic">
+                <input type="text" name="topic" placeholder="例如：AI 搜索会不会替代传统搜索" style="min-width: 260px;">
+                <input type="number" name="max_sources" value="6" min="2" max="10" title="资料条数">
+                <button type="submit" class="secondary">按话题生成</button>
+              </form>
+            </div>
+
+            <div class="action-card step-extra" style="margin-top: 14px;">
+              <div class="step-row">
+                <span class="step-num">头</span>
+                <h3>初始化今日头条登录态</h3>
+              </div>
+              <p>首次使用前先打开头条号登录页，登录成功后会把登录态保存在本地 Profile 目录，后续就可以直接一键发布文章。</p>
+              <form class="action-foot" method="post" action="/actions/login-toutiao">
+                <button type="submit" class="ghost">打开头条号登录页</button>
+              </form>
+            </div>
+
+            <div class="action-card step-extra" style="margin-top: 14px;">
+              <div class="step-row">
+                <span class="step-num">清</span>
+                <h3>清理旧热点</h3>
+              </div>
+              <p>自动删除超过保留天数的热点抓取批次和未成稿聚类；默认保留已生成初稿，勾选后会同步删除旧稿件和配图。</p>
+              <form class="inline-form action-foot" method="post" action="/actions/cleanup-hotspots">
+                <label style="display:flex; align-items:center; gap:8px; margin:0; color:#334155; font-weight:700;">
+                  保留
+                  <input type="number" name="retention_days" value="{{ ((runtime.hotspot_cleanup.retention_hours if runtime.hotspot_cleanup is defined and runtime.hotspot_cleanup.retention_hours else 48) / 24) | round(0, 'ceil') | int }}" min="1" max="30" style="width:88px;">
+                  天
+                </label>
+                <label style="display:flex; align-items:center; gap:8px; margin:0; color:#334155; font-weight:700;">
+                  <input type="checkbox" name="include_drafts" style="width:auto;">
+                  同时清理已生成初稿
+                </label>
+                <button type="submit" class="ghost">立即清理旧热点</button>
+              </form>
+            </div>
+
             <div class="action-card step-extra" style="margin-top: 14px;">
               <div class="step-row">
                 <span class="step-num">分</span>
@@ -1324,6 +1436,16 @@
                     {% endif %}
                   </div>
                   <div class="draft-meta">{{ draft.created_at_text }}{% if draft.review_model %} ｜ {{ draft.review_model }}{% endif %}</div>
+                  {% if draft.wechat_uploaded_at_text or draft.toutiao_uploaded_at_text %}
+                  <div class="publish-meta">
+                    {% if draft.wechat_uploaded_at_text %}
+                    <span class="publish-chip wechat">公众号已上传</span>
+                    {% endif %}
+                    {% if draft.toutiao_uploaded_at_text %}
+                    <span class="publish-chip toutiao">头条已发布</span>
+                    {% endif %}
+                  </div>
+                  {% endif %}
                   {% if draft.review_summary %}
                   <div class="draft-summary">{{ draft.review_summary }}</div>
                   {% endif %}
@@ -1511,6 +1633,15 @@
               </label>
               <div class="form-tip">开启后，补抓和成稿阶段会跳过偏新闻播报、官方通报、政策公告、硬新闻快讯类内容，优先保留适合公众号二创解读的选题。</div>
 
+              <label>旧热点自动清理</label>
+              <label>
+                <input type="checkbox" name="hotspot_cleanup_enabled" {% if runtime.hotspot_cleanup is not defined or runtime.hotspot_cleanup.enabled %}checked{% endif %} style="width:auto; margin-right:8px;">
+                一键执行前自动删除太久的热点缓存
+              </label>
+              <label>热点保留时长（小时）</label>
+              <input type="number" min="1" max="720" name="hotspot_cleanup_retention_hours" value="{{ runtime.hotspot_cleanup.retention_hours if runtime.hotspot_cleanup is defined and runtime.hotspot_cleanup.retention_hours else 48 }}">
+              <div class="form-tip">只清理热点抓取批次和未成稿聚类；已生成文章的关联聚类会保留。</div>
+
               <label>每篇稿件最多插图数</label>
               <input type="number" min="1" max="12" name="image_max_per_draft" value="{{ runtime.images.max_per_draft if runtime.images else 6 }}">
 
@@ -1527,6 +1658,12 @@
                 生图失败后回退原文取图
               </label>
 
+              <label>
+                <input type="checkbox" name="image_fallback_to_web_search" {% if runtime.images is not defined or runtime.images.fallback_to_web_search is not defined or runtime.images.fallback_to_web_search %}checked{% endif %} style="width:auto; margin-right:8px;">
+                原文无图时联网搜图兜底
+              </label>
+              <div class="form-tip">插图顺序：AI 生图优先 → 原文取图 → 联网搜图。联网搜图会过滤新华社、央视、logo、水印、二维码等明显不适合图片。</div>
+
               <label>生图 API 地址</label>
               <input name="image_generation_base_url" value="{{ runtime.images.generation.base_url if runtime.images and runtime.images.generation else '' }}" placeholder="例如：https://xxx/v1 或 https://xxx/v1/images/generations">
 
@@ -1541,7 +1678,14 @@
 
               <label>生图并发数</label>
               <input type="number" min="1" max="12" name="image_generation_concurrency" value="{{ runtime.images.generation.concurrency if runtime.images and runtime.images.generation and runtime.images.generation.concurrency else 4 }}">
-              <div class="form-tip">生图模型较慢时建议 3-4；如果生图服务有并发限制，可调低。</div>
+              <div class="form-tip">生图模型较慢时建议 2-4；如果生图服务有并发限制，可调低。</div>
+
+              <label>单张生图超时（秒）</label>
+              <input type="number" min="10" max="600" name="image_generation_timeout_seconds" value="{{ runtime.images.generation.timeout_seconds if runtime.images and runtime.images.generation and runtime.images.generation.timeout_seconds else 180 }}">
+
+              <label>整批生图最大等待（秒）</label>
+              <input type="number" min="10" max="900" name="image_generation_total_timeout_seconds" value="{{ runtime.images.generation.total_timeout_seconds if runtime.images and runtime.images.generation and runtime.images.generation.total_timeout_seconds else 240 }}">
+              <div class="form-tip">超过整批最大等待后，会跳过未完成图片并继续归档/评分，避免一个慢生图任务卡住全流程。</div>
 
               <label>生图 Prompt 模板（可配置）</label>
               <textarea class="prompt-textarea" name="image_generation_prompt_template" placeholder="留空使用系统内置插图 Prompt。可用变量：{article_title}、{section_title}、{section_excerpt}、{image_index}、{image_count}">{{ runtime.images.generation.prompt_template if runtime.images and runtime.images.generation else '' }}</textarea>
@@ -1559,7 +1703,97 @@
 
               <label>推送公众号单篇最多上传图片数</label>
               <input type="number" min="1" max="8" name="wechat_gateway_max_images" value="{{ runtime.wechat_gateway.max_images if runtime.wechat_gateway is defined and runtime.wechat_gateway.max_images else 4 }}">
-              <div class="form-tip">微信草稿接口对标题、摘要、图片上传有约束；系统会自动缩短标题、默认不传摘要，并上传封面与正文图片。</div>
+              <div class="form-tip">微信草稿接口对标题、摘要、图片上传有约束；系统默认保留完整标题，仅超过微信 64 字限制时才截断，并上传封面与正文图片。</div>
+
+              <hr class="section-divider">
+              <h3 class="subsection-title">今日头条直接发布</h3>
+
+              <label>浏览器通道</label>
+              <input name="toutiao_channel" value="{{ runtime.toutiao.channel if runtime.toutiao is defined and runtime.toutiao.channel else 'chrome' }}" placeholder="默认 chrome">
+
+              <label>头条登录态目录</label>
+              <input name="toutiao_browser_profile_dir" value="{{ runtime.toutiao.browser_profile_dir if runtime.toutiao is defined and runtime.toutiao.browser_profile_dir else 'C:\\ai_work\\hotrank_pipeline\\data\\browser_profiles\\toutiao' }}">
+
+              <label>
+                <input type="checkbox" name="toutiao_headless" {% if runtime.toutiao is defined and runtime.toutiao.headless %}checked{% endif %} style="width:auto; margin-right:8px;">
+                无头模式运行（不推荐首次登录时开启）
+              </label>
+
+              <label>登录等待秒数</label>
+              <input type="number" min="30" max="900" name="toutiao_login_wait_seconds" value="{{ runtime.toutiao.login_wait_seconds if runtime.toutiao is defined and runtime.toutiao.login_wait_seconds else 180 }}">
+
+              <label>发布超时秒数</label>
+              <input type="number" min="30" max="900" name="toutiao_publish_timeout_seconds" value="{{ runtime.toutiao.publish_timeout_seconds if runtime.toutiao is defined and runtime.toutiao.publish_timeout_seconds else 240 }}">
+
+              <label>头条标题最大长度</label>
+              <input type="number" min="20" max="200" name="toutiao_title_char_limit" value="{{ runtime.toutiao.title_char_limit if runtime.toutiao is defined and runtime.toutiao.title_char_limit else 100 }}">
+
+              <label>正文最多保留内嵌图片数</label>
+              <input type="number" min="0" max="12" name="toutiao_max_inline_images" value="{{ runtime.toutiao.max_inline_images if runtime.toutiao is defined and runtime.toutiao.max_inline_images is not none else 6 }}">
+
+              <label>发布校验列表数量</label>
+              <input type="number" min="5" max="50" name="toutiao_verify_list_limit" value="{{ runtime.toutiao.verify_list_limit if runtime.toutiao is defined and runtime.toutiao.verify_list_limit else 20 }}">
+
+              <label>头条登录账号</label>
+              <input name="toutiao_username" value="" placeholder="当前：{{ masked_toutiao_username if masked_toutiao_username else '未配置，可填手机号或邮箱' }}">
+
+              <label>头条登录密码</label>
+              <input type="password" name="toutiao_password" value="" placeholder="当前：{{ '已配置则留空即可' if masked_toutiao_password else '未配置' }}">
+
+              <label>
+                <input type="checkbox" name="toutiao_auto_password_login" {% if runtime.toutiao is not defined or runtime.toutiao.auto_password_login is not defined or runtime.toutiao.auto_password_login %}checked{% endif %} style="width:auto; margin-right:8px;">
+                优先使用已配置的账号密码自动登录
+              </label>
+
+              <label>
+                <input type="checkbox" name="toutiao_auto_open_login_on_publish" {% if runtime.toutiao is not defined or runtime.toutiao.auto_open_login_on_publish is not defined or runtime.toutiao.auto_open_login_on_publish %}checked{% endif %} style="width:auto; margin-right:8px;">
+                发布时若未登录，自动拉起头条号登录页
+              </label>
+              <label>
+                <input type="checkbox" name="toutiao_publish_ad_enabled" {% if runtime.toutiao is not defined or runtime.toutiao.publish_options is not defined or runtime.toutiao.publish_options.ad_enabled is not defined or runtime.toutiao.publish_options.ad_enabled %}checked{% endif %} style="width:auto; margin-right:8px;">
+                默认投放广告赚收益
+              </label>
+
+              <label>
+                <input type="checkbox" name="toutiao_claim_exclusive" {% if runtime.toutiao is defined and runtime.toutiao.publish_options is defined and runtime.toutiao.publish_options.claim_exclusive %}checked{% endif %} style="width:auto; margin-right:8px;">
+                默认勾选头条首发
+              </label>
+
+              <label>
+                <input type="checkbox" name="toutiao_publish_more_income" {% if runtime.toutiao is defined and runtime.toutiao.publish_options is defined and runtime.toutiao.publish_options.publish_more_income %}checked{% endif %} style="width:auto; margin-right:8px;">
+                默认勾选“发布得更多收益”
+              </label>
+
+              <label>
+                <input type="checkbox" name="toutiao_disable_auto_rights_protection" {% if runtime.toutiao is not defined or runtime.toutiao.publish_options is not defined or runtime.toutiao.publish_options.disable_auto_rights_protection is not defined or runtime.toutiao.publish_options.disable_auto_rights_protection %}checked{% endif %} style="width:auto; margin-right:8px;">
+                自动尝试取消维权类勾选（若当前账号页面存在）
+              </label>
+
+              <label>默认合集名称</label>
+              <input name="toutiao_collection_name" value="{{ runtime.toutiao.publish_options.collection_name if runtime.toutiao is defined and runtime.toutiao.publish_options is defined and runtime.toutiao.publish_options.collection_name else '这事和你有关' }}" placeholder="例如：这事和你有关">
+
+              <label>默认作品声明</label>
+              <input name="toutiao_statement_labels" value="{{ (runtime.toutiao.publish_options.statement_labels | join('，')) if runtime.toutiao is defined and runtime.toutiao.publish_options is defined and runtime.toutiao.publish_options.statement_labels else '个人观点，仅供参考' }}" placeholder="多个可用逗号分隔，例如：个人观点，仅供参考">
+
+              <div class="form-tip">头条发布逻辑会尽量复用当前公众号格式：标题自动截断到头条配置上限，正文优先走富文本剪贴板写入；封面会按图片数量自动选择单图 / 三图，无图则切换为无封面；同时自动设置广告、合集、作品声明，然后执行“预览并发布 / 确认发布”。若配置了头条账号密码，系统会先尝试密码登录；若仍失败，再保留手动登录等待时间。</div>
+
+              <hr class="section-divider">
+              <h3 class="subsection-title">钉钉进度通知</h3>
+
+              <label>
+                <input type="checkbox" name="dingtalk_enabled" {% if runtime.notifications is defined and runtime.notifications.dingtalk is defined and runtime.notifications.dingtalk.enabled %}checked{% endif %} style="width:auto; margin-right:8px;">
+                开启钉钉进度通知
+              </label>
+
+              <label>钉钉 Webhook</label>
+              <input name="dingtalk_webhook" value="" placeholder="当前：{{ masked_dingtalk_webhook }}">
+
+              <label>钉钉 Secret（加签）</label>
+              <input name="dingtalk_secret" value="" placeholder="当前：已配置则留空即可">
+
+              <label>钉钉超时（秒）</label>
+              <input type="number" min="3" max="30" name="dingtalk_timeout_seconds" value="{{ runtime.notifications.dingtalk.timeout_seconds if runtime.notifications is defined and runtime.notifications.dingtalk is defined and runtime.notifications.dingtalk.timeout_seconds else 10 }}">
+              <div class="form-tip">保存后、跑流程后、重新生成后都会自动发一条进度通知；Webhook / Secret 留空则保留当前值。</div>
 
               <div style="margin-top: 16px;">
                 <button type="submit" class="full-button">保存当前配置</button>
@@ -1576,6 +1810,7 @@
     const logBox = document.getElementById("runtimeLogBox");
     const runtimeNotice = document.getElementById("runtimeNotice");
     const logStatus = document.getElementById("logStatus");
+    const clearLogsBtn = document.getElementById("clearLogsBtn");
 
     function noticeClass(level) {
       return ["log-notice", level || "info"].join(" ");
@@ -1635,9 +1870,35 @@
       }
     }
 
+    async function clearRuntimeLogs() {
+      if (!clearLogsBtn) return;
+      clearLogsBtn.disabled = true;
+      clearLogsBtn.textContent = "清除中...";
+      try {
+        const response = await fetch("/api/runtime-logs/clear", {
+          method: "POST",
+          headers: { "Accept": "application/json; charset=utf-8" }
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        renderLogs([]);
+        renderNotice(null);
+        logStatus.textContent = "日志已清空";
+      } catch (error) {
+        logStatus.textContent = "清除失败";
+      } finally {
+        clearLogsBtn.disabled = false;
+        clearLogsBtn.textContent = "清除日志";
+      }
+    }
+
+    if (clearLogsBtn) {
+      clearLogsBtn.addEventListener("click", clearRuntimeLogs);
+    }
+
     refreshRuntimeLogs();
     setInterval(refreshRuntimeLogs, 5000);
   </script>
 </body>
 </html>
-

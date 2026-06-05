@@ -184,6 +184,10 @@ create table if not exists article_drafts (
     review_summary text,
     review_model text,
     reviewed_at timestamptz,
+    wechat_uploaded_at timestamptz,
+    wechat_media_id text,
+    toutiao_uploaded_at timestamptz,
+    toutiao_article_id text,
     created_at timestamptz not null default now()
 );
 
@@ -191,7 +195,11 @@ alter table article_drafts
     add column if not exists review_score numeric(4,1),
     add column if not exists review_summary text,
     add column if not exists review_model text,
-    add column if not exists reviewed_at timestamptz;
+    add column if not exists reviewed_at timestamptz,
+    add column if not exists wechat_uploaded_at timestamptz,
+    add column if not exists wechat_media_id text,
+    add column if not exists toutiao_uploaded_at timestamptz,
+    add column if not exists toutiao_article_id text;
 
 create index if not exists idx_article_drafts_cluster_id
     on article_drafts(cluster_id, created_at desc);

@@ -117,6 +117,16 @@ SOURCE_IMAGE_URL_BLOCKLIST_TOKENS = (
     "headimg",
     "profile_photo",
     "sprite",
+    "phncdn.com",
+    "pornhub",
+    "rule34",
+    "xvideos",
+    "xnxx",
+    "adult",
+    "pinimg.com",
+    "pinterest",
+    "tumblr.com",
+    "goodreads.com",
 )
 
 

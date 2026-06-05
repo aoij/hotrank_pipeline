@@ -5,7 +5,10 @@ from typing import Callable
 from .clustering import build_clusters
 from .config import Settings, load_runtime_config
 from .db import (
+    cleanup_old_hotspots,
     count_recent_clusters,
+    delete_old_drafts,
+    find_existing_draft_for_topic,
     fetch_cluster_sources_for_generation,
     fetch_latest_whitelisted_items,
     fetch_recent_clusters,
@@ -15,14 +18,22 @@ from .db import (
     init_db,
     persist_article_fetch_result,
     persist_cluster_run,
+    persist_manual_topic_bundle,
     persist_scrape_result,
     persist_draft_record,
     update_draft_review,
 )
 from .content_filters import is_blocked_source_image_url, is_newslike_text
 from .fetchers import fetch_article
-from .llm import archive_draft, generate_wechat_draft, review_wechat_draft
+from .llm import (
+    archive_draft,
+    generate_wechat_draft,
+    polish_wechat_draft_after_self_review,
+    review_wechat_draft,
+)
 from .multi_source import scrape_configured_sources
+from .notifications import send_dingtalk_progress
+from .search_sources import search_topic_sources
 from .tophub import scrape_tophub_news
 
 
@@ -32,6 +43,26 @@ ProgressCallback = Callable[[str, str], None]
 def _emit(progress_cb: ProgressCallback | None, level: str, message: str) -> None:
     if progress_cb:
         progress_cb(level, message)
+
+
+def _notify(settings: Settings, title: str, lines: list[str], level: str = "info") -> None:
+    send_dingtalk_progress(settings, title=title, lines=lines, level=level)
+
+
+def _existing_draft_payload(draft: dict) -> dict:
+    return {
+        "draft_id": draft["id"],
+        "cluster_id": draft["cluster_id"],
+        "title": draft.get("title"),
+        "archive_path": draft.get("archive_path"),
+        "image_count": None,
+        "image_candidate_count": None,
+        "image_source": "existing",
+        "review_score": float(draft["review_score"]) if draft.get("review_score") is not None else None,
+        "review_summary": draft.get("review_summary") or "",
+        "created_at_text": draft.get("created_at_text") or "",
+        "skipped_existing": True,
+    }
 
 
 def _is_newslike_text(title: str, summary: str = "", content: str = "") -> bool:
@@ -157,6 +188,260 @@ def _collect_draft_images(cluster: dict, image_config: dict) -> list[str]:
             break
         round_index += 1
     return selected
+
+
+
+def run_cleanup_old_hotspots(
+    settings: Settings,
+    progress_cb: ProgressCallback | None = None,
+    retention_hours_override: int | None = None,
+    include_drafts: bool = False,
+) -> dict:
+    runtime_config = load_runtime_config(settings)
+    cleanup_config = runtime_config.get("hotspot_cleanup") or {}
+    enabled = bool(cleanup_config.get("enabled", True))
+    retention_hours = int(retention_hours_override or cleanup_config.get("retention_hours", 48))
+    if not enabled:
+        _emit(progress_cb, "info", "旧热点自动清理未启用，已跳过")
+        return {
+            "enabled": False,
+            "retention_hours": retention_hours,
+            "deleted_crawl_runs": 0,
+            "deleted_cluster_runs": 0,
+            "deleted_draft_count": 0,
+            "deleted_drafts": [],
+        }
+    if include_drafts:
+        _emit(progress_cb, "warning", f"开始清理旧热点和旧初稿：保留最近 {retention_hours} 小时数据；超过时间的已生成初稿也会删除")
+        deleted_drafts = delete_old_drafts(settings, retention_hours=retention_hours)
+        _emit(progress_cb, "info", f"旧初稿数据库清理完成：删除 {len(deleted_drafts)} 篇，准备继续清理无稿件聚类")
+    else:
+        deleted_drafts = []
+        _emit(progress_cb, "info", f"开始清理旧热点：保留最近 {retention_hours} 小时数据；已生成稿件关联的聚类会保留")
+    result = cleanup_old_hotspots(settings, retention_hours=retention_hours)
+    result["enabled"] = True
+    result["deleted_draft_count"] = len(deleted_drafts)
+    result["deleted_drafts"] = deleted_drafts
+    _emit(
+        progress_cb,
+        "success",
+        (
+            f"旧热点清理完成：删除抓取批次 {result['deleted_crawl_runs']} 个｜"
+            f"删除无稿件聚类批次 {result['deleted_cluster_runs']} 个｜"
+            f"删除旧初稿 {result['deleted_draft_count']} 篇"
+        ),
+    )
+    return result
+
+
+def run_manual_topic_draft(settings: Settings, topic: str, max_sources: int = 6, progress_cb: ProgressCallback | None = None) -> dict:
+    runtime_config = load_runtime_config(settings)
+    llm_config = runtime_config.get("llm", {})
+    image_config = runtime_config.get("images", {})
+    clean_topic = (topic or "").strip()
+    if not clean_topic:
+        raise RuntimeError("请输入要生成文章的话题")
+    if not llm_config.get("api_key"):
+        raise RuntimeError("local_settings.json 未配置 llm.api_key")
+
+    max_sources = max(2, min(int(max_sources or 6), 10))
+    _emit(progress_cb, "info", f"开始按话题全网搜集创作灵感：{clean_topic}｜目标资料 {max_sources} 条")
+    sources = search_topic_sources(
+        clean_topic,
+        max_results=max_sources,
+        timeout_seconds=settings.request_timeout_seconds,
+        llm_config=llm_config,
+        progress_cb=progress_cb,
+    )
+    if runtime_config.get("content_filter", {}).get("exclude_newslike", True):
+        before = len(sources)
+        sources = [source for source in sources if not _is_newslike_item(source)]
+        skipped = before - len(sources)
+        if skipped:
+            _emit(progress_cb, "info", f"手动话题已过滤新闻/通稿类资料：{skipped} 条")
+    if not sources:
+        raise RuntimeError("没有搜索到可用于生成文章的资料，建议换一个更具体的话题")
+
+    existing_draft = find_existing_draft_for_topic(settings, canonical_title=clean_topic)
+    if existing_draft:
+        _emit(
+            progress_cb,
+            "warning",
+            (
+                f"检测到同主题初稿已存在，跳过重复生成：draft_id={existing_draft['id']}｜"
+                f"{existing_draft.get('title') or clean_topic}"
+            ),
+        )
+        _notify(
+            settings,
+            "已跳过：手动话题重复生成",
+            [
+                f"话题：{clean_topic}",
+                f"已存在稿件：draft_id={existing_draft['id']}",
+                f"标题：{existing_draft.get('title') or clean_topic}",
+            ],
+            level="warning",
+        )
+        payload = _existing_draft_payload(existing_draft)
+        payload.update(
+            {
+                "cluster_id": existing_draft["cluster_id"],
+                "source_count": len(sources),
+            }
+        )
+        return payload
+
+    llm_inspiration_summary = next((source.get("llm_inspiration_summary") for source in sources if source.get("llm_inspiration_summary")), "")
+    cluster_summary = llm_inspiration_summary or "；".join((source.get("summary") or source.get("title") or "")[:120] for source in sources[:4])
+    bundle = persist_manual_topic_bundle(settings, clean_topic, sources, cluster_summary=cluster_summary)
+    cluster = {
+        "cluster_id": bundle["cluster_id"],
+        "canonical_title": clean_topic,
+        "cluster_summary": cluster_summary,
+        "signal_score": 9999.0,
+        "item_count": len(sources),
+        "sources": sources,
+    }
+    source_boards = "、".join(sorted({source.get("board_name") or "全网灵感" for source in sources})[:8])
+    _emit(progress_cb, "success", f"创作灵感汇集完成：有效资料 {len(sources)} 条｜来源={source_boards}｜cluster_id={bundle['cluster_id']}")
+    _notify(
+        settings,
+        "已完成：全网灵感汇集",
+        [
+            f"话题：{clean_topic}",
+            f"有效资料：{len(sources)} 条",
+            f"来源：{source_boards or '全网灵感'}",
+        ],
+        level="success",
+    )
+
+    image_urls = _collect_draft_images(cluster, image_config)
+    _emit(progress_cb, "info", f"开始生成手动话题初稿：{clean_topic}｜回退候选图 {len(image_urls)} 张")
+    title, content_md, prompt_excerpt, title_alignment = generate_wechat_draft(
+        llm_config=llm_config,
+        cluster=cluster,
+        article_sources=sources,
+    )
+    if title_alignment.get("changed"):
+        _emit(progress_cb, "warning", f"标题一致性校验触发纠偏：原标题={title_alignment.get('original_title')}｜改后={title_alignment.get('final_title')}｜原因={title_alignment.get('reason')}")
+        _notify(
+            settings,
+            "已触发：标题一致性纠偏",
+            [
+                f"话题：{clean_topic}",
+                f"原标题：{title_alignment.get('original_title') or title}",
+                f"改后标题：{title_alignment.get('final_title') or title}",
+                f"原因：{title_alignment.get('reason') or '标题与内容不一致'}",
+            ],
+            level="warning",
+        )
+    else:
+        _emit(progress_cb, "info", f"标题一致性校验通过：{title}")
+    _emit(progress_cb, "info", f"手动话题初稿模型返回完成：{title}")
+    if llm_config.get("auto_polish_draft", True):
+        try:
+            _emit(progress_cb, "info", f"开始AI自检并改稿：{title}")
+            title, content_md, polish_prompt_excerpt, polish_alignment = polish_wechat_draft_after_self_review(
+                llm_config=llm_config,
+                title=title,
+                content_md=content_md,
+                cluster=cluster,
+                source_materials=sources,
+                max_chars=int(llm_config.get("draft_max_chars", 2600)),
+            )
+            if polish_alignment.get("changed"):
+                _emit(progress_cb, "warning", f"AI自检后标题再次被纠偏：原标题={polish_alignment.get('original_title')}｜改后={polish_alignment.get('final_title')}｜原因={polish_alignment.get('reason')}")
+            prompt_excerpt = (
+                f"{prompt_excerpt[:800]}\n\n"
+                f"--- AI自检改稿 ---\n{polish_prompt_excerpt[:400]}"
+            )[:1200]
+            _emit(progress_cb, "success", f"AI自检改稿完成：{title}")
+        except Exception as exc:
+            _emit(progress_cb, "warning", f"AI自检改稿失败，继续使用原初稿：{exc}")
+    duplicate_after_generation = find_existing_draft_for_topic(
+        settings,
+        canonical_title=clean_topic,
+        draft_title=title,
+    )
+    if duplicate_after_generation:
+        _emit(
+            progress_cb,
+            "warning",
+            (
+                f"模型成稿与已有稿件重复，已跳过归档：draft_id={duplicate_after_generation['id']}｜"
+                f"{duplicate_after_generation.get('title') or title}"
+            ),
+        )
+        _notify(
+            settings,
+            "已跳过：重复初稿拦截",
+            [
+                f"话题：{clean_topic}",
+                f"重复稿件：draft_id={duplicate_after_generation['id']}",
+                f"标题：{duplicate_after_generation.get('title') or title}",
+            ],
+            level="warning",
+        )
+        payload = _existing_draft_payload(duplicate_after_generation)
+        payload.update(
+            {
+                "cluster_id": duplicate_after_generation["cluster_id"],
+                "source_count": len(sources),
+            }
+        )
+        return payload
+    archive_path, downloaded_images, image_source, final_content = archive_draft(
+        runtime_config["draft_output_dir"],
+        title,
+        content_md,
+        image_urls=image_urls,
+        image_config=image_config,
+        progress_cb=progress_cb,
+    )
+    draft_id = persist_draft_record(
+        settings=settings,
+        cluster_id=bundle["cluster_id"],
+        model_name=llm_config["model"],
+        model_base_url=llm_config["base_url"],
+        title=title,
+        content_md=final_content,
+        archive_path=archive_path,
+        prompt_excerpt=prompt_excerpt,
+    )
+
+    review_score = None
+    review_summary = ""
+    try:
+        _emit(progress_cb, "info", f"开始模型审核文章评分：draft_id={draft_id}")
+        review_score, review_summary, _ = review_wechat_draft(llm_config=llm_config, title=title, content_md=final_content)
+        update_draft_review(settings, draft_id, review_score, review_summary, llm_config["model"])
+        _emit(progress_cb, "success", f"模型审核完成：文章分 {review_score:.1f}｜{review_summary[:80]}")
+    except Exception as exc:
+        _emit(progress_cb, "warning", f"初稿已生成，但评分失败：draft_id={draft_id}｜{exc}")
+
+    payload = {
+        "draft_id": draft_id,
+        "cluster_id": bundle["cluster_id"],
+        "title": title,
+        "archive_path": archive_path,
+        "source_count": len(sources),
+        "image_count": downloaded_images,
+        "image_source": image_source,
+        "review_score": review_score,
+        "review_summary": review_summary,
+    }
+    _emit(progress_cb, "success", f"手动话题初稿完成：draft_id={draft_id}｜配图 {downloaded_images} 张｜{title}")
+    _notify(
+        settings,
+        "已完成：手动话题初稿",
+        [
+            f"标题：{title}",
+            f"配图：{downloaded_images} 张（来源={image_source}）",
+            f"文章分：{review_score:.1f}" if review_score is not None else "文章分：暂未生成",
+        ],
+        level="success",
+    )
+    return payload
 
 
 def run_scrape(settings: Settings, progress_cb: ProgressCallback | None = None) -> dict:
@@ -355,6 +640,7 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
     clusters = clusters[:limit]
     generated = []
     failed = []
+    skipped_existing = []
     total = len(clusters)
 
     image_generation = image_config.get("generation") or {}
@@ -369,6 +655,23 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
     )
 
     for idx, cluster in enumerate(clusters, start=1):
+        existing_draft = find_existing_draft_for_topic(
+            settings,
+            cluster_id=int(cluster["cluster_id"]),
+            canonical_title=cluster.get("canonical_title") or "",
+        )
+        if existing_draft:
+            skipped_existing.append(_existing_draft_payload(existing_draft))
+            _emit(
+                progress_cb,
+                "warning",
+                (
+                    f"[成稿 {idx}/{total}] 检测到同篇初稿已存在，跳过重复生成："
+                    f"draft_id={existing_draft['id']}｜{existing_draft.get('title') or cluster['canonical_title']}"
+                ),
+            )
+            continue
+
         image_urls = _collect_draft_images(cluster, image_config)
         _emit(
             progress_cb,
@@ -380,18 +683,86 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
         )
 
         try:
-            title, content_md, prompt_excerpt = generate_wechat_draft(
+            title, content_md, prompt_excerpt, title_alignment = generate_wechat_draft(
                 llm_config=llm_config,
                 cluster=cluster,
                 article_sources=cluster["sources"],
             )
+            if title_alignment.get("changed"):
+                _emit(progress_cb, "warning", f"[成稿 {idx}/{total}] 标题一致性校验触发纠偏：原标题={title_alignment.get('original_title')}｜改后={title_alignment.get('final_title')}｜原因={title_alignment.get('reason')}")
+                _notify(
+                    settings,
+                    "已触发：标题一致性纠偏",
+                    [
+                        f"热点：{cluster.get('canonical_title') or title}",
+                        f"原标题：{title_alignment.get('original_title') or title}",
+                        f"改后标题：{title_alignment.get('final_title') or title}",
+                        f"原因：{title_alignment.get('reason') or '标题与内容不一致'}",
+                    ],
+                    level="warning",
+                )
+            else:
+                _emit(progress_cb, "info", f"[成稿 {idx}/{total}] 标题一致性校验通过：{title}")
             _emit(progress_cb, "info", f"[成稿 {idx}/{total}] 模型返回完成：{title}")
-            archive_path, downloaded_images, image_source = archive_draft(
+            if llm_config.get("auto_polish_draft", True):
+                try:
+                    _emit(progress_cb, "info", f"[成稿 {idx}/{total}] 开始AI自检并改稿：{title}")
+                    title, content_md, polish_prompt_excerpt, polish_alignment = polish_wechat_draft_after_self_review(
+                        llm_config=llm_config,
+                        title=title,
+                        content_md=content_md,
+                        cluster=cluster,
+                        source_materials=cluster["sources"],
+                        max_chars=int(llm_config.get("draft_max_chars", 2600)),
+                    )
+                    if polish_alignment.get("changed"):
+                        _emit(progress_cb, "warning", f"[成稿 {idx}/{total}] AI自检后标题再次被纠偏：原标题={polish_alignment.get('original_title')}｜改后={polish_alignment.get('final_title')}｜原因={polish_alignment.get('reason')}")
+                    prompt_excerpt = (
+                        f"{prompt_excerpt[:800]}\n\n"
+                        f"--- AI自检改稿 ---\n{polish_prompt_excerpt[:400]}"
+                    )[:1200]
+                    _emit(progress_cb, "success", f"[成稿 {idx}/{total}] AI自检改稿完成：{title}")
+                except Exception as polish_exc:
+                    _emit(
+                        progress_cb,
+                        "warning",
+                        f"[成稿 {idx}/{total}] AI自检改稿失败，继续使用原初稿：{polish_exc}",
+                    )
+            duplicate_after_generation = find_existing_draft_for_topic(
+                settings,
+                cluster_id=int(cluster["cluster_id"]),
+                canonical_title=cluster.get("canonical_title") or "",
+                draft_title=title,
+            )
+            if duplicate_after_generation:
+                skipped_existing.append(_existing_draft_payload(duplicate_after_generation))
+                _emit(
+                    progress_cb,
+                    "warning",
+                    (
+                        f"[成稿 {idx}/{total}] 模型成稿与已有稿件重复，跳过归档："
+                        f"draft_id={duplicate_after_generation['id']}｜"
+                        f"{duplicate_after_generation.get('title') or title}"
+                    ),
+                )
+                _notify(
+                    settings,
+                    "已跳过：重复初稿拦截",
+                    [
+                        f"热点：{cluster.get('canonical_title') or title}",
+                        f"重复稿件：draft_id={duplicate_after_generation['id']}",
+                        f"标题：{duplicate_after_generation.get('title') or title}",
+                    ],
+                    level="warning",
+                )
+                continue
+            archive_path, downloaded_images, image_source, final_content = archive_draft(
                 runtime_config["draft_output_dir"],
                 title,
                 content_md,
                 image_urls=image_urls,
                 image_config=image_config,
+                progress_cb=progress_cb,
             )
             _emit(
                 progress_cb,
@@ -404,7 +775,7 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
                 model_name=llm_config["model"],
                 model_base_url=llm_config["base_url"],
                 title=title,
-                content_md=content_md,
+                content_md=final_content,
                 archive_path=archive_path,
                 prompt_excerpt=prompt_excerpt,
             )
@@ -415,7 +786,7 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
                 review_score, review_summary, _ = review_wechat_draft(
                     llm_config=llm_config,
                     title=title,
-                    content_md=content_md,
+                    content_md=final_content,
                 )
                 update_draft_review(
                     settings=settings,
@@ -453,6 +824,16 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
                 "success",
                 f"[成稿 {idx}/{total}] 生成完成：draft_id={draft_id}｜文章分={review_score if review_score is not None else '未评分'}｜{title}",
             )
+            _notify(
+                settings,
+                "已完成：热点成稿优化",
+                [
+                    f"标题：{title}",
+                    f"配图：{downloaded_images} 张（来源={image_source}）",
+                    f"文章分：{review_score:.1f}" if review_score is not None else "文章分：暂未生成",
+                ],
+                level="success",
+            )
         except Exception as exc:
             failed.append(
                 {
@@ -472,11 +853,31 @@ def run_generate_drafts(settings: Settings, limit: int = 1, progress_cb: Progres
         "generated_count": len(generated),
         "failed_count": len(failed),
         "skipped_newslike": skipped_newslike,
+        "skipped_existing_count": len(skipped_existing),
         "drafts": generated,
+        "skipped_existing": skipped_existing,
         "failed": failed,
     }
     finish_level = "success" if not failed else "warning"
-    _emit(progress_cb, finish_level, f"公众号初稿生成完成：generated={len(generated)} failed={len(failed)}")
+    _emit(
+        progress_cb,
+        finish_level,
+        (
+            f"公众号初稿生成完成：generated={len(generated)} "
+            f"skipped_existing={len(skipped_existing)} failed={len(failed)}"
+        ),
+    )
+    _notify(
+        settings,
+        "已完成：公众号初稿批量生成",
+        [
+            f"成功：{len(generated)} 篇",
+            f"重复跳过：{len(skipped_existing)} 篇",
+            f"失败：{len(failed)} 篇",
+            f"新闻类跳过：{skipped_newslike} 条",
+        ],
+        level=finish_level,
+    )
     return payload
 
 
@@ -529,37 +930,60 @@ def run_review_drafts(settings: Settings, limit: int = 10, progress_cb: Progress
     }
     level = "success" if not failed else "warning"
     _emit(progress_cb, level, f"模型审核评分完成：reviewed={len(reviewed)} failed={len(failed)}")
+    _notify(
+        settings,
+        "已完成：模型审核评分",
+        [
+            f"已评分：{len(reviewed)} 篇",
+            f"失败：{len(failed)} 篇",
+        ],
+        level=level,
+    )
     return payload
 
 
 def run_full_pipeline(settings: Settings, draft_limit: int = 1, progress_cb: ProgressCallback | None = None) -> dict:
-    _emit(progress_cb, "info", "阶段 0/4：初始化数据库结构")
+    _emit(progress_cb, "info", "阶段 0/5：初始化数据库结构")
     init_db(settings)
-    _emit(progress_cb, "success", "阶段 0/4：数据库结构已就绪")
+    _emit(progress_cb, "success", "阶段 0/5：数据库结构已就绪")
 
-    _emit(progress_cb, "info", "阶段 1/4：开始抓取热点")
+    cleanup_result = run_cleanup_old_hotspots(settings, progress_cb=progress_cb)
+
+    _emit(progress_cb, "info", "阶段 1/5：开始抓取热点")
     scrape_result = run_scrape(settings, progress_cb=progress_cb)
-    _emit(progress_cb, "success", f"阶段 1/4：抓取完成，items={scrape_result['item_count']}")
+    _emit(progress_cb, "success", f"阶段 1/5：抓取完成，items={scrape_result['item_count']}")
 
-    _emit(progress_cb, "info", "阶段 2/4：开始热点聚类")
+    _emit(progress_cb, "info", "阶段 2/5：开始热点聚类")
     cluster_result = run_cluster(settings, progress_cb=progress_cb)
-    _emit(progress_cb, "success", f"阶段 2/4：聚类完成，clusters={cluster_result['cluster_count']}")
+    _emit(progress_cb, "success", f"阶段 2/5：聚类完成，clusters={cluster_result['cluster_count']}")
 
-    _emit(progress_cb, "info", "阶段 3/4：开始正文补抓")
+    _emit(progress_cb, "info", "阶段 3/5：开始正文补抓")
     enrich_result = run_article_enrichment(settings, limit=30, progress_cb=progress_cb)
-    _emit(progress_cb, "success", f"阶段 3/4：正文补抓完成，fetched={enrich_result['fetched']}")
+    _emit(progress_cb, "success", f"阶段 3/5：正文补抓完成，fetched={enrich_result['fetched']}")
 
-    _emit(progress_cb, "info", f"阶段 4/4：开始生成初稿，draft_limit={draft_limit}")
+    _emit(progress_cb, "info", f"阶段 4/5：开始生成初稿，draft_limit={draft_limit}")
     draft_result = run_generate_drafts(settings, limit=draft_limit, progress_cb=progress_cb)
-    _emit(progress_cb, "success", f"阶段 4/4：初稿生成完成，drafts={draft_result['generated_count']}")
+    _emit(progress_cb, "success", f"阶段 4/5：初稿生成完成，drafts={draft_result['generated_count']}")
 
     payload = {
+        "cleanup": cleanup_result,
         "scrape": scrape_result,
         "cluster": cluster_result,
         "enrich": enrich_result,
         "draft": draft_result,
     }
     _emit(progress_cb, "success", "一键全流程全部完成")
+    _notify(
+        settings,
+        "已完成：一键全流程",
+        [
+            f"抓取热点：{scrape_result['item_count']} 条",
+            f"聚类：{cluster_result['cluster_count']} 组",
+            f"正文补抓成功：{enrich_result['fetched']} 条",
+            f"生成初稿：{draft_result['generated_count']} 篇",
+        ],
+        level="success",
+    )
     return payload
 
 

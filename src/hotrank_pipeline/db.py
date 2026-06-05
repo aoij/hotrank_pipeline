@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from pathlib import Path
 
 import psycopg
@@ -7,6 +9,11 @@ from psycopg.rows import dict_row
 
 from .config import Settings
 from .models import ArticleFetchResult, BoardCard, ScrapeResult, TopicCluster
+
+
+def _normalize_topic_text(value: str) -> str:
+    clean = unicodedata.normalize("NFKC", (value or "").strip()).lower()
+    return re.sub(r"[\W_]+", "", clean, flags=re.UNICODE)
 
 
 def get_connection(settings: Settings) -> psycopg.Connection:
@@ -406,9 +413,15 @@ def fetch_recent_drafts(settings: Settings, limit: int = 20) -> list[dict]:
                     d.review_summary,
                     d.review_model,
                     d.reviewed_at,
+                    d.wechat_uploaded_at,
+                    d.wechat_media_id,
+                    d.toutiao_uploaded_at,
+                    d.toutiao_article_id,
                     d.created_at,
                     tc.canonical_title,
                     to_char(d.reviewed_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as reviewed_at_text,
+                    to_char(d.wechat_uploaded_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as wechat_uploaded_at_text,
+                    to_char(d.toutiao_uploaded_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as toutiao_uploaded_at_text,
                     to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
                 from article_drafts d
                 join topic_clusters tc on tc.id = d.cluster_id
@@ -438,9 +451,15 @@ def fetch_draft_by_id(settings: Settings, draft_id: int) -> dict | None:
                     d.review_summary,
                     d.review_model,
                     d.reviewed_at,
+                    d.wechat_uploaded_at,
+                    d.wechat_media_id,
+                    d.toutiao_uploaded_at,
+                    d.toutiao_article_id,
                     d.created_at,
                     tc.canonical_title,
                     to_char(d.reviewed_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as reviewed_at_text,
+                    to_char(d.wechat_uploaded_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as wechat_uploaded_at_text,
+                    to_char(d.toutiao_uploaded_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as toutiao_uploaded_at_text,
                     to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
                 from article_drafts d
                 join topic_clusters tc on tc.id = d.cluster_id
@@ -451,6 +470,153 @@ def fetch_draft_by_id(settings: Settings, draft_id: int) -> dict | None:
             )
             row = cur.fetchone()
             return dict(row) if row else None
+
+
+def find_existing_draft_for_topic(
+    settings: Settings,
+    *,
+    cluster_id: int | None = None,
+    canonical_title: str = "",
+    draft_title: str = "",
+    lookback_limit: int = 200,
+) -> dict | None:
+    clean_title = (canonical_title or "").strip()
+    clean_draft_title = (draft_title or "").strip()
+    with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            if cluster_id and clean_title:
+                cur.execute(
+                    """
+                    select
+                        d.id,
+                        d.cluster_id,
+                        d.title,
+                        d.archive_path,
+                        d.review_score,
+                        d.review_summary,
+                        d.wechat_uploaded_at,
+                        d.wechat_media_id,
+                        d.toutiao_uploaded_at,
+                        d.toutiao_article_id,
+                        d.created_at,
+                        tc.canonical_title,
+                        to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
+                    from article_drafts d
+                    join topic_clusters tc on tc.id = d.cluster_id
+                    where d.cluster_id = %s or tc.canonical_title = %s
+                    order by
+                        case when d.cluster_id = %s then 0 else 1 end,
+                        d.created_at desc,
+                        d.id desc
+                    limit 1
+                    """,
+                    (cluster_id, clean_title, cluster_id),
+                )
+            elif cluster_id:
+                cur.execute(
+                    """
+                    select
+                        d.id,
+                        d.cluster_id,
+                        d.title,
+                        d.archive_path,
+                        d.review_score,
+                        d.review_summary,
+                        d.wechat_uploaded_at,
+                        d.wechat_media_id,
+                        d.toutiao_uploaded_at,
+                        d.toutiao_article_id,
+                        d.created_at,
+                        tc.canonical_title,
+                        to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
+                    from article_drafts d
+                    join topic_clusters tc on tc.id = d.cluster_id
+                    where d.cluster_id = %s
+                    order by d.created_at desc, d.id desc
+                    limit 1
+                    """,
+                    (cluster_id,),
+                )
+            elif clean_title:
+                cur.execute(
+                    """
+                    select
+                        d.id,
+                        d.cluster_id,
+                        d.title,
+                        d.archive_path,
+                        d.review_score,
+                        d.review_summary,
+                        d.wechat_uploaded_at,
+                        d.wechat_media_id,
+                        d.toutiao_uploaded_at,
+                        d.toutiao_article_id,
+                        d.created_at,
+                        tc.canonical_title,
+                        to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
+                    from article_drafts d
+                    join topic_clusters tc on tc.id = d.cluster_id
+                    where tc.canonical_title = %s
+                    order by d.created_at desc, d.id desc
+                    limit 1
+                    """,
+                    (clean_title,),
+                )
+            else:
+                row = None
+
+            if cluster_id or clean_title:
+                row = cur.fetchone()
+                if row:
+                    return dict(row)
+
+            normalized_targets = {
+                value
+                for value in (
+                    _normalize_topic_text(clean_title),
+                    _normalize_topic_text(clean_draft_title),
+                )
+                if value
+            }
+            if not normalized_targets:
+                return None
+
+            cur.execute(
+                """
+                select
+                    d.id,
+                    d.cluster_id,
+                    d.title,
+                    d.archive_path,
+                    d.review_score,
+                    d.review_summary,
+                    d.wechat_uploaded_at,
+                    d.wechat_media_id,
+                    d.toutiao_uploaded_at,
+                    d.toutiao_article_id,
+                    d.created_at,
+                    tc.canonical_title,
+                    to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
+                from article_drafts d
+                join topic_clusters tc on tc.id = d.cluster_id
+                order by d.created_at desc, d.id desc
+                limit %s
+                """,
+                (max(20, int(lookback_limit or 200)),),
+            )
+            for candidate in cur.fetchall():
+                row_dict = dict(candidate)
+                normalized_existing = {
+                    value
+                    for value in (
+                        _normalize_topic_text(row_dict.get("canonical_title") or ""),
+                        _normalize_topic_text(row_dict.get("title") or ""),
+                    )
+                    if value
+                }
+                if normalized_existing & normalized_targets:
+                    return row_dict
+            return None
 
 
 def delete_drafts_by_ids(settings: Settings, draft_ids: list[int]) -> list[dict]:
@@ -471,6 +637,33 @@ def delete_drafts_by_ids(settings: Settings, draft_ids: list[int]) -> list[dict]
             rows = [dict(row) for row in cur.fetchall()]
             if rows:
                 cur.execute("delete from article_drafts where id = any(%s)", (ids,))
+        conn.commit()
+    return rows
+
+
+def delete_old_drafts(settings: Settings, retention_hours: int = 48) -> list[dict]:
+    retention_hours = max(1, int(retention_hours))
+    with get_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                with old_drafts as (
+                    select id, title, archive_path
+                    from article_drafts
+                    where created_at < now() - (%s::text || ' hours')::interval
+                ),
+                deleted as (
+                    delete from article_drafts
+                    where id in (select id from old_drafts)
+                    returning id, title, archive_path
+                )
+                select id, title, archive_path
+                from deleted
+                order by id
+                """,
+                (retention_hours,),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
         conn.commit()
     return rows
 
@@ -522,6 +715,39 @@ def update_draft_review(
                 where id = %s
                 """,
                 (score, review_summary, review_model, draft_id),
+            )
+        conn.commit()
+
+
+def mark_draft_wechat_uploaded(settings: Settings, draft_id: int, media_id: str | None = None) -> None:
+    with get_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                update article_drafts
+                set
+                    wechat_uploaded_at = now(),
+                    wechat_media_id = coalesce(%s, wechat_media_id)
+                where id = %s
+                """,
+                (media_id, draft_id),
+            )
+        conn.commit()
+
+
+def mark_draft_toutiao_uploaded(settings: Settings, draft_id: int, article_id: str | int | None = None) -> None:
+    article_id_text = str(article_id).strip() if article_id is not None else None
+    with get_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                update article_drafts
+                set
+                    toutiao_uploaded_at = now(),
+                    toutiao_article_id = coalesce(%s, toutiao_article_id)
+                where id = %s
+                """,
+                (article_id_text or None, draft_id),
             )
         conn.commit()
 
@@ -672,6 +898,24 @@ def persist_draft_record(
         return draft_id
 
 
+def fetch_draft_source_images(settings: Settings, draft_id: int) -> list[str]:
+    with psycopg.connect(settings.dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select distinct asi.image_url
+                from article_drafts d
+                join topic_cluster_items tci on tci.cluster_id = d.cluster_id
+                join article_sources a on a.board_snapshot_item_id = tci.board_snapshot_item_id
+                join article_source_images asi on asi.source_id = a.id
+                where d.id = %s
+                order by asi.image_url
+                """,
+                (draft_id,),
+            )
+            return [row[0] for row in cur.fetchall() if row and row[0]]
+
+
 def update_draft_content(
     settings: Settings,
     draft_id: int,
@@ -699,3 +943,216 @@ def update_draft_content(
                     (content_md, draft_id),
                 )
         conn.commit()
+
+
+def cleanup_old_hotspots(settings: Settings, retention_hours: int = 48) -> dict[str, int]:
+    retention_hours = max(1, int(retention_hours))
+    with get_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                with old_runs as (
+                    select id from crawl_runs
+                    where fetched_at < now() - (%s::text || ' hours')::interval
+                ),
+                deleted as (
+                    delete from crawl_runs
+                    where id in (select id from old_runs)
+                    returning id
+                )
+                select count(*) as deleted_crawl_runs from deleted
+                """,
+                (retention_hours,),
+            )
+            deleted_crawl_runs = int((cur.fetchone() or {}).get("deleted_crawl_runs", 0))
+
+            cur.execute(
+                """
+                with old_cluster_runs as (
+                    select cr.id
+                    from cluster_runs cr
+                    where cr.created_at < now() - (%s::text || ' hours')::interval
+                      and not exists (
+                          select 1
+                          from topic_clusters tc
+                          join article_drafts d on d.cluster_id = tc.id
+                          where tc.cluster_run_id = cr.id
+                      )
+                ),
+                deleted as (
+                    delete from cluster_runs
+                    where id in (select id from old_cluster_runs)
+                    returning id
+                )
+                select count(*) as deleted_cluster_runs from deleted
+                """,
+                (retention_hours,),
+            )
+            deleted_cluster_runs = int((cur.fetchone() or {}).get("deleted_cluster_runs", 0))
+        conn.commit()
+
+    return {
+        "retention_hours": retention_hours,
+        "deleted_crawl_runs": deleted_crawl_runs,
+        "deleted_cluster_runs": deleted_cluster_runs,
+    }
+
+
+def persist_manual_topic_bundle(
+    settings: Settings,
+    topic: str,
+    sources: list[dict],
+    cluster_summary: str,
+) -> dict[str, int]:
+    from .tophub import normalize_title
+
+    clean_topic = (topic or "").strip()
+    if not clean_topic:
+        raise ValueError("topic is empty")
+
+    with get_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into crawl_runs (source_name, source_url, status_code, raw_html_path, html_sha256, note)
+                values (%s, %s, %s, %s, %s, %s)
+                returning id
+                """,
+                ("manual_topic", f"manual://{clean_topic}", 200, "", "", f"topic={clean_topic}; sources={len(sources)}"),
+            )
+            run_id = cur.fetchone()[0]
+
+            board_url = "manual://topic-search"
+            cur.execute(
+                """
+                insert into boards (source_name, page_category, tophub_node_id, board_name, board_type, board_url)
+                values (%s, %s, %s, %s, %s, %s)
+                on conflict (board_url) do update
+                set updated_at = now(), board_name = excluded.board_name
+                returning id
+                """,
+                ("manual_topic", "manual", "manual:topic", "手动话题", "manual", board_url),
+            )
+            board_id = cur.fetchone()[0]
+
+            cur.execute(
+                """
+                insert into board_snapshots (run_id, board_id, updated_text, item_count)
+                values (%s, %s, %s, %s)
+                returning id
+                """,
+                (run_id, board_id, "手动话题搜索", len(sources)),
+            )
+            snapshot_id = cur.fetchone()[0]
+
+            item_ids: list[int] = []
+            article_source_rows: list[int] = []
+            for idx, source in enumerate(sources, start=1):
+                title = (source.get("title") or clean_topic).strip()
+                url = (source.get("source_url") or source.get("final_url") or f"manual://{idx}").strip()
+                summary = (source.get("summary") or "").strip()
+                content_text = (source.get("content_text") or summary or title).strip()
+                cur.execute(
+                    """
+                    insert into board_snapshot_items (
+                        snapshot_id, rank_num, title, normalized_title, hot_value_raw, source_url, source_item_id, raw_text
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s)
+                    returning id
+                    """,
+                    (snapshot_id, idx, title, normalize_title(title), "手动搜索", url, f"manual-{run_id}-{idx}", summary),
+                )
+                item_id = cur.fetchone()[0]
+                item_ids.append(item_id)
+
+                cur.execute(
+                    """
+                    insert into article_sources (
+                        board_snapshot_item_id, board_name, source_url, source_host, final_url,
+                        fetch_status, http_status, content_type, title, summary, content_text,
+                        lead_image_url, content_hash, fetched_at, note, updated_at
+                    )
+                    values (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s,
+                        %s, %s, now(), %s, now()
+                    )
+                    returning id
+                    """,
+                    (
+                        item_id,
+                        source.get("board_name") or "手动搜索",
+                        url,
+                        source.get("source_host") or "",
+                        source.get("final_url") or url,
+                        "fetched",
+                        source.get("http_status"),
+                        source.get("content_type") or "text/html",
+                        title,
+                        summary,
+                        content_text,
+                        (source.get("image_urls") or [""])[0] if source.get("image_urls") else "",
+                        source.get("content_hash") or "",
+                        "manual topic bundle",
+                    ),
+                )
+                article_source_id = cur.fetchone()[0]
+                article_source_rows.append(article_source_id)
+                for image_idx, image_url in enumerate(source.get("image_urls") or [], start=1):
+                    cur.execute(
+                        """
+                        insert into article_source_images (source_id, image_url, sort_order)
+                        values (%s, %s, %s)
+                        on conflict (source_id, image_url) do nothing
+                        """,
+                        (article_source_id, image_url, image_idx),
+                    )
+
+            cur.execute(
+                """
+                insert into cluster_runs (whitelist_boards, cluster_count, note)
+                values (%s, %s, %s)
+                returning id
+                """,
+                (["手动话题"], 1, f"manual topic={clean_topic}"),
+            )
+            cluster_run_id = cur.fetchone()[0]
+
+            cur.execute(
+                """
+                insert into topic_clusters (cluster_run_id, cluster_key, canonical_title, cluster_summary, signal_score, item_count)
+                values (%s, %s, %s, %s, %s, %s)
+                returning id
+                """,
+                (cluster_run_id, f"manual:{run_id}", clean_topic, cluster_summary, 9999, len(item_ids)),
+            )
+            cluster_id = cur.fetchone()[0]
+
+            for idx, (item_id, source) in enumerate(zip(item_ids, sources), start=1):
+                cur.execute(
+                    """
+                    insert into topic_cluster_items (
+                        cluster_id, board_snapshot_item_id, board_name, rank_num, title, hot_value_raw, source_url, match_score, is_primary
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        cluster_id,
+                        item_id,
+                        source.get("board_name") or "手动搜索",
+                        idx,
+                        source.get("title") or clean_topic,
+                        "手动搜索",
+                        source.get("source_url") or source.get("final_url") or f"manual://{idx}",
+                        1.0,
+                        idx == 1,
+                    ),
+                )
+        conn.commit()
+
+    return {
+        "run_id": run_id,
+        "cluster_run_id": cluster_run_id,
+        "cluster_id": cluster_id,
+        "source_count": len(sources),
+    }

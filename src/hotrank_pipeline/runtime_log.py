@@ -48,6 +48,18 @@ def read_runtime_logs(limit: int = 120) -> list[dict[str, Any]]:
     return entries[-max(1, limit) :]
 
 
+def clear_runtime_logs() -> int:
+    if not _LOG_PATH.exists():
+        return 0
+    with _LOG_LOCK:
+        try:
+            count = len(_LOG_PATH.read_text(encoding="utf-8").splitlines())
+        except OSError:
+            count = 0
+        _LOG_PATH.write_text("", encoding="utf-8")
+    return count
+
+
 def latest_notice(logs: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not logs:
         return None

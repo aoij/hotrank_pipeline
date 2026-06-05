@@ -50,6 +50,12 @@
     "max_per_source": 4,
     "prefer_ai_generated": true,
     "fallback_to_source": true,
+    "fallback_to_web_search": true,
+    "search": {
+      "enabled": true,
+      "max_candidates": 18,
+      "timeout_seconds": 15
+    },
     "generation": {
       "base_url": "",
       "api_key": "",
@@ -57,7 +63,11 @@
       "size": "1024x1024",
       "timeout_seconds": 180,
       "concurrency": 4,
-      "prompt_template": ""
+      "prompt_template": "",
+      "total_timeout_seconds": 240,
+      "retry_count": 2,
+      "retry_backoff_seconds": 3,
+      "disable_env_proxy": true
     }
   },
   "content_filter": {
@@ -72,12 +82,39 @@
     "timeout_seconds": 180,
     "retry_count": 3,
     "retry_backoff_seconds": 2.0,
-    "draft_prompt": ""
+    "draft_prompt": "",
+    "auto_polish_draft": true
   },
   "draft_output_dir": "T:\\微信公众号文档",
   "wechat_gateway": {
     "base_url": "http://106.12.11.147:18080",
     "token": "",
     "max_images": 4
+  },
+  "toutiao": {
+    "channel": "chrome",
+    "browser_profile_dir": "C:\\ai_work\\hotrank_pipeline\\data\\browser_profiles\\toutiao",
+    "headless": false,
+    "login_wait_seconds": 180,
+    "publish_timeout_seconds": 240,
+    "title_char_limit": 100,
+    "max_inline_images": 6,
+    "verify_list_limit": 20,
+    "auto_open_login_on_publish": true,
+    "username": "",
+    "password": "",
+    "auto_password_login": true
+  },
+  "notifications": {
+    "dingtalk": {
+      "enabled": false,
+      "webhook": "",
+      "secret": "",
+      "timeout_seconds": 10
+    }
+  },
+  "hotspot_cleanup": {
+    "enabled": true,
+    "retention_hours": 48
   }
 }

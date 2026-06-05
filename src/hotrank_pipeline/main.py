@@ -7,12 +7,15 @@ from .config import get_settings
 from .db import fetch_stats, init_db
 from .services import (
     run_article_enrichment,
+    run_cleanup_old_hotspots,
     run_cluster,
     run_full_pipeline,
     run_generate_drafts,
+    run_manual_topic_draft,
     run_review_drafts,
     run_scrape,
 )
+from .toutiao_publisher import login_toutiao, publish_recent_drafts_to_toutiao
 from .wechat_publisher import publish_recent_drafts_to_wechat
 
 
@@ -30,8 +33,17 @@ def build_parser() -> argparse.ArgumentParser:
     draft_parser.add_argument("--limit", type=int, default=1, help="最多生成多少篇")
     review_parser = subparsers.add_parser("review-drafts", help="让模型审核已生成初稿并写入文章评分")
     review_parser.add_argument("--limit", type=int, default=10, help="最多评分多少篇未评分初稿")
+    cleanup_parser = subparsers.add_parser("cleanup-hotspots", help="清理太久的热点缓存和未成稿聚类")
+    cleanup_parser.add_argument("--retention-hours", type=int, default=None, help="覆盖配置里的热点保留小时数")
+    manual_parser = subparsers.add_parser("manual-topic-draft", help="按指定话题联网搜索资料并生成公众号初稿")
+    manual_parser.add_argument("topic", help="要生成文章的话题")
+    manual_parser.add_argument("--max-sources", type=int, default=6, help="最多汇集多少条资料")
     publish_parser = subparsers.add_parser("publish-wechat-drafts", help="把高分初稿推送到微信公众号草稿箱")
     publish_parser.add_argument("--limit", type=int, default=10, help="最多推送多少篇")
+    toutiao_login_parser = subparsers.add_parser("login-toutiao", help="初始化今日头条登录态")
+    toutiao_login_parser.add_argument("--pretty", action="store_true", help="输出缩进 JSON")
+    toutiao_publish_parser = subparsers.add_parser("publish-toutiao-drafts", help="把高分初稿直接发布到今日头条")
+    toutiao_publish_parser.add_argument("--limit", type=int, default=10, help="最多发布多少篇")
     pipeline_parser = subparsers.add_parser("run-pipeline", help="执行 scrape -> cluster -> enrich -> generate")
     pipeline_parser.add_argument("--draft-limit", type=int, default=1, help="完整流程最后生成多少篇")
     web_parser = subparsers.add_parser("run-web", help="启动 Web 页面")
@@ -72,8 +84,32 @@ def main() -> int:
         print(json.dumps(run_review_drafts(settings, limit=args.limit), ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "cleanup-hotspots":
+        if args.retention_hours is not None:
+            from .config import load_runtime_config, save_runtime_config
+
+            runtime = load_runtime_config(settings)
+            runtime.setdefault("hotspot_cleanup", {})
+            runtime["hotspot_cleanup"]["enabled"] = True
+            runtime["hotspot_cleanup"]["retention_hours"] = max(1, int(args.retention_hours))
+            save_runtime_config(settings, runtime)
+        print(json.dumps(run_cleanup_old_hotspots(settings), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "manual-topic-draft":
+        print(json.dumps(run_manual_topic_draft(settings, topic=args.topic, max_sources=args.max_sources), ensure_ascii=False, indent=2))
+        return 0
+
     if args.command == "publish-wechat-drafts":
         print(json.dumps(publish_recent_drafts_to_wechat(settings, limit=args.limit), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "login-toutiao":
+        print(json.dumps(login_toutiao(settings), ensure_ascii=False, indent=2 if args.pretty else None))
+        return 0
+
+    if args.command == "publish-toutiao-drafts":
+        print(json.dumps(publish_recent_drafts_to_toutiao(settings, limit=args.limit), ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "run-pipeline":

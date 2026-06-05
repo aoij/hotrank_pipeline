@@ -14,10 +14,10 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageOps
 
 from .config import Settings, load_runtime_config
-from .db import fetch_draft_by_id, fetch_recent_drafts
+from .db import fetch_draft_by_id, fetch_recent_drafts, mark_draft_wechat_uploaded
 
 
-TITLE_BYTE_LIMIT = 30
+WECHAT_TITLE_CHAR_LIMIT = 64
 MAX_DIGEST_CHARS = 0
 DEFAULT_MAX_IMAGES = 4
 
@@ -38,27 +38,11 @@ IMG_STYLE = "display:block;width:100%;max-width:100%;height:auto;margin:20px aut
 BLOCKQUOTE_STYLE = "margin:18px 0;padding:14px 16px;background:#f8fafc;border-left:4px solid #93c5fd;color:#475569;box-sizing:border-box;"
 
 
-def _short_title(title: str, byte_limit: int = TITLE_BYTE_LIMIT) -> str:
+def _wechat_title(title: str, char_limit: int = WECHAT_TITLE_CHAR_LIMIT) -> str:
     value = re.sub(r"\s+", " ", (title or "").strip().strip("“”\"'"))
-    replacements = [
-        ("的人，后来都怎样了？", "会怎样？"),
-        ("的人，后来都怎样了", "会怎样"),
-        ("到底是不是大问题？", "是不是大问题？"),
-        ("我们帮你快速捋清", "快速看懂"),
-        ("（附应对方法）", ""),
-    ]
-    for old, new in replacements:
-        value = value.replace(old, new)
-    if len(value.encode("utf-8")) <= byte_limit:
+    if len(value) <= char_limit:
         return value
-
-    result = ""
-    for char in value:
-        candidate = result + char
-        if len(candidate.encode("utf-8")) > byte_limit:
-            break
-        result = candidate
-    return result.rstrip("，。！？、：；-— ") or value[:12]
+    return value[:char_limit].rstrip("，。！？、：；-— ") or value[:char_limit]
 
 
 def _open_rgb_image(path: Path) -> Image.Image:
@@ -331,11 +315,23 @@ def publish_draft_to_wechat(settings: Settings, draft_id: int) -> dict[str, Any]
     draft = fetch_draft_by_id(settings, draft_id)
     if not draft:
         raise RuntimeError(f"稿件不存在：draft_id={draft_id}")
+    if draft.get("wechat_uploaded_at"):
+        return {
+            "draft_id": draft_id,
+            "title": draft.get("title"),
+            "wechat_title": _wechat_title(draft.get("title") or draft.get("canonical_title") or f"draft_id={draft_id}"),
+            "review_score": float(draft.get("review_score") or 0),
+            "image_count": 0,
+            "media_id": draft.get("wechat_media_id"),
+            "uploaded_image_count": 0,
+            "already_uploaded": True,
+            "uploaded_at_text": draft.get("wechat_uploaded_at_text") or "",
+        }
     archive_path = Path(draft.get("archive_path") or "")
     if not archive_path.exists():
         raise RuntimeError(f"稿件归档文件不存在：{archive_path}")
 
-    title = _short_title(draft.get("title") or draft.get("canonical_title") or archive_path.stem)
+    title = _wechat_title(draft.get("title") or draft.get("canonical_title") or archive_path.stem)
     content_md = _read_markdown(archive_path)
     content_html, images, cover_path = _markdown_to_payload_html(
         content_md=content_md,
@@ -368,6 +364,8 @@ def publish_draft_to_wechat(settings: Settings, draft_id: int) -> dict[str, Any]
     if not response.ok or not body.get("ok"):
         raise RuntimeError(body.get("detail") or body.get("raw") or response.text[:500] or f"HTTP {response.status_code}")
 
+    mark_draft_wechat_uploaded(settings, draft_id, body.get("media_id"))
+
     return {
         "draft_id": draft_id,
         "title": draft.get("title"),
@@ -376,24 +374,32 @@ def publish_draft_to_wechat(settings: Settings, draft_id: int) -> dict[str, Any]
         "image_count": len(images),
         "media_id": body.get("media_id"),
         "uploaded_image_count": body.get("uploaded_image_count"),
+        "already_uploaded": False,
     }
 
 
 def publish_recent_drafts_to_wechat(settings: Settings, limit: int = 10) -> dict[str, Any]:
-    candidates = fetch_recent_drafts(settings, limit=max(1, limit * 3))
+    candidates = fetch_recent_drafts(settings, limit=max(1, min(limit * 6, 200)))
     published = []
     failed = []
+    skipped = []
     for draft in candidates:
         if len(published) >= limit:
             break
         try:
-            published.append(publish_draft_to_wechat(settings, int(draft["id"])))
+            result = publish_draft_to_wechat(settings, int(draft["id"]))
+            if result.get("already_uploaded"):
+                skipped.append(result)
+                continue
+            published.append(result)
         except Exception as exc:
             failed.append({"draft_id": draft["id"], "title": draft["title"], "error": str(exc)})
     return {
         "requested": limit,
         "published_count": len(published),
+        "skipped_count": len(skipped),
         "failed_count": len(failed),
         "published": published,
+        "skipped": skipped,
         "failed": failed,
     }

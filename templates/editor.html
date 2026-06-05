@@ -127,6 +127,12 @@
       color: #991b1b;
     }
 
+    .publish-notice.warning {
+      border-color: #fde68a;
+      background: #fffbeb;
+      color: #92400e;
+    }
+
     .regen-dialog {
       width: min(92vw, 460px);
       padding: 28px;
@@ -218,6 +224,38 @@
       color: #1d4ed8;
       font-size: 12px;
       font-weight: 700;
+    }
+    .channel-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .channel-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1;
+      border: 1px solid transparent;
+    }
+    .channel-tag.wechat {
+      background: #ecfdf3;
+      border-color: #bbf7d0;
+      color: #15803d;
+    }
+    .channel-tag.toutiao {
+      background: #fff1f2;
+      border-color: #fecdd3;
+      color: #e11d48;
+    }
+    .channel-tag.pending {
+      background: #f8fafc;
+      border-color: #e2e8f0;
+      color: #64748b;
     }
     .source-box {
       padding: 14px;
@@ -535,6 +573,27 @@
           <div class="source-box">
             <div><strong>当前标题：</strong>{{ editor_title }}</div>
             <div style="margin-top:8px;"><strong>稿件路径：</strong>{{ archive_path or '当前为新建空白稿件' }}</div>
+            {% if current_draft %}
+            <div style="margin-top:8px;"><strong>发布状态：</strong></div>
+            <div class="channel-tags">
+              {% if current_draft.wechat_uploaded_at_text %}
+              <span class="channel-tag wechat">公众号已上传</span>
+              {% else %}
+              <span class="channel-tag pending">公众号未上传</span>
+              {% endif %}
+              {% if current_draft.toutiao_uploaded_at_text %}
+              <span class="channel-tag toutiao">头条已发布</span>
+              {% else %}
+              <span class="channel-tag pending">头条未发布</span>
+              {% endif %}
+            </div>
+            {% if current_draft.wechat_uploaded_at_text %}
+            <div style="margin-top:8px;">公众号：{{ current_draft.wechat_uploaded_at_text }}{% if current_draft.wechat_media_id %} ｜ media_id={{ current_draft.wechat_media_id }}{% endif %}</div>
+            {% endif %}
+            {% if current_draft.toutiao_uploaded_at_text %}
+            <div style="margin-top:8px;">头条：{{ current_draft.toutiao_uploaded_at_text }}{% if current_draft.toutiao_article_id %} ｜ article_id={{ current_draft.toutiao_article_id }}{% endif %}</div>
+            {% endif %}
+            {% endif %}
           </div>
 
           <div style="margin-top: 18px;">
@@ -543,8 +602,17 @@
           {% if source_type == 'db' and source_id %}
           {% if request.query_params.get('wechat_publish') == 'success' %}
           <div class="publish-notice">已成功推送到微信公众号草稿箱，请到公众号后台草稿箱查看。</div>
+          {% elif request.query_params.get('wechat_publish') == 'already' %}
+          <div class="publish-notice warning">这篇稿件之前已经推送过微信公众号草稿箱，本次已拦截重复上传。{% if request.query_params.get('error') %}<br>{{ request.query_params.get('error') }}{% endif %}</div>
           {% elif request.query_params.get('wechat_publish') == 'failed' %}
           <div class="publish-notice failed">推送微信公众号草稿箱失败，请查看控制台执行日志。{% if request.query_params.get('error') %}<br>{{ request.query_params.get('error') }}{% endif %}</div>
+          {% endif %}
+          {% if request.query_params.get('toutiao_publish') == 'success' %}
+          <div class="publish-notice">已成功发布到今日头条，请到头条号后台已发布列表查看。</div>
+          {% elif request.query_params.get('toutiao_publish') == 'already' %}
+          <div class="publish-notice warning">这篇稿件之前已经发布过今日头条，本次已拦截重复发布。{% if request.query_params.get('error') %}<br>{{ request.query_params.get('error') }}{% endif %}</div>
+          {% elif request.query_params.get('toutiao_publish') == 'failed' %}
+          <div class="publish-notice failed">发布今日头条失败，请查看控制台执行日志。{% if request.query_params.get('error') %}<br>{{ request.query_params.get('error') }}{% endif %}</div>
           {% endif %}
           {% if request.query_params.get('delete') == 'success' %}
           <div class="publish-notice">稿件已删除，数据库记录和本地归档文件已同步清理。</div>
@@ -552,9 +620,14 @@
           <div class="publish-notice failed">未找到要删除的稿件，可能已被删除。</div>
           {% endif %}
           <form method="post" action="/editor/{{ source_id }}/publish-wechat" style="margin-top: 12px;" id="publishWechatForm">
-            <button class="btn-link primary" type="submit" style="width: 100%; cursor: pointer;" id="publishWechatBtn">推送到微信公众号草稿箱</button>
+            <button class="btn-link primary" type="submit" style="width: 100%; cursor: pointer;" id="publishWechatBtn">{% if current_draft and current_draft.wechat_uploaded_at_text %}再次推送到微信公众号草稿箱{% else %}推送到微信公众号草稿箱{% endif %}</button>
           </form>
-          <div class="copy-tip" style="margin: 10px 0 0;">会自动上传封面和正文插图，并处理微信标题/摘要长度限制；推送成功后去公众号后台草稿箱继续审核发布。</div>
+          <div class="copy-tip" style="margin: 10px 0 0;">会自动上传封面和正文插图；标题默认完整保留，仅超过微信 64 字限制时才截断。{% if current_draft and current_draft.wechat_uploaded_at_text %}当前稿件已在 {{ current_draft.wechat_uploaded_at_text }} 推送过，再次点击会提示“已上传过”，不会重复入库。{% else %}推送成功后去公众号后台草稿箱继续审核发布。{% endif %}</div>
+
+          <form method="post" action="/editor/{{ source_id }}/publish-toutiao" style="margin-top: 12px;" id="publishToutiaoForm">
+            <button class="btn-link primary" type="submit" style="width: 100%; cursor: pointer;" id="publishToutiaoBtn">{% if current_draft and current_draft.toutiao_uploaded_at_text %}再次发布到今日头条{% else %}发布到今日头条{% endif %}</button>
+          </form>
+          <div class="copy-tip" style="margin: 10px 0 0;">会优先复用当前公众号排版与插图，自动写入头条号编辑器并直接执行发布；首次使用若未登录，会自动打开头条号登录页。{% if current_draft and current_draft.toutiao_uploaded_at_text %}当前稿件已在 {{ current_draft.toutiao_uploaded_at_text }} 发布过，再次点击会提示“已发布过”，不会重复提交。{% endif %}</div>
 
           <form method="post" action="/editor/{{ source_id }}/regenerate-images" style="margin-top: 12px;" id="regenerateImagesForm">
             <button class="btn-link" type="submit" style="width: 100%; cursor: pointer;" id="regenerateImagesBtn">重新生成插图</button>
@@ -592,7 +665,20 @@
                   <div class="meta">
                     <div>ID：{{ draft.id }}｜时间：{{ draft.created_at_text }}</div>
                     <div>模型：{{ draft.model_name }}</div>
+                    <div class="channel-tags" style="margin-top:8px;">
+                      {% if draft.wechat_uploaded_at_text %}
+                      <span class="channel-tag wechat">公众号已上传</span>
+                      {% endif %}
+                      {% if draft.toutiao_uploaded_at_text %}
+                      <span class="channel-tag toutiao">头条已发布</span>
+                      {% endif %}
+                      {% if not draft.wechat_uploaded_at_text and not draft.toutiao_uploaded_at_text %}
+                      <span class="channel-tag pending">暂未分发</span>
+                      {% endif %}
+                    </div>
                     {% if draft.reviewed_at_text %}<div>评分时间：{{ draft.reviewed_at_text }}</div>{% endif %}
+                    {% if draft.wechat_uploaded_at_text %}<div>公众号时间：{{ draft.wechat_uploaded_at_text }}</div>{% endif %}
+                    {% if draft.toutiao_uploaded_at_text %}<div>头条时间：{{ draft.toutiao_uploaded_at_text }}</div>{% endif %}
                     <div>归档：{{ draft.archive_path }}</div>
                   </div>
                   {% if draft.review_summary %}
@@ -689,6 +775,8 @@
     const publishWechatForm = document.getElementById("publishWechatForm");
     const publishWechatBtn = document.getElementById("publishWechatBtn");
     const publishOverlay = document.getElementById("publishOverlay");
+    const publishToutiaoForm = document.getElementById("publishToutiaoForm");
+    const publishToutiaoBtn = document.getElementById("publishToutiaoBtn");
     const deleteCurrentDraftForm = document.getElementById("deleteCurrentDraftForm");
     const bulkDeleteForm = document.getElementById("bulkDeleteForm");
     const selectAllDrafts = document.getElementById("selectAllDrafts");
@@ -757,6 +845,22 @@
         publishWechatBtn.disabled = true;
         publishWechatBtn.classList.add("is-loading");
         publishWechatBtn.textContent = "正在推送，请稍候...";
+        publishOverlay.classList.add("show");
+        publishOverlay.setAttribute("aria-hidden", "false");
+      });
+    }
+
+    if (publishToutiaoForm && publishToutiaoBtn && publishOverlay) {
+      publishToutiaoForm.addEventListener("submit", () => {
+        publishToutiaoBtn.disabled = true;
+        publishToutiaoBtn.classList.add("is-loading");
+        publishToutiaoBtn.textContent = "正在发布，请稍候...";
+        const title = publishOverlay.querySelector("h3");
+        const desc = publishOverlay.querySelector("p");
+        const hint = publishOverlay.querySelector(".regen-hint");
+        if (title) title.textContent = "正在发布到今日头条";
+        if (desc) desc.textContent = "系统正在写入标题、正文和封面，并执行预览发布 / 确认发布。";
+        if (hint) hint.textContent = "首次未登录时会自动打开头条号登录页；登录完成后会自动继续发布，请不要重复点击。";
         publishOverlay.classList.add("show");
         publishOverlay.setAttribute("aria-hidden", "false");
       });
