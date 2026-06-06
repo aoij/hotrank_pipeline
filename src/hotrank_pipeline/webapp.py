@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .config import get_settings, load_runtime_config, mask_secret, save_runtime_config
+from .daily_brief import _BRIEF_ROOT
 from .db import (
     delete_drafts_by_ids,
     fetch_draft_by_id,
@@ -24,6 +25,8 @@ from .db import (
 from .llm import regenerate_draft_images_file
 from .multi_source import merged_multi_source_config, parse_lines, parse_rss_feed_lines, rss_feeds_to_text
 from .notifications import send_dingtalk_progress
+from .scheduler import ensure_scheduler_running, get_scheduler_state, trigger_daily_publish_now
+from .scheduler_history import latest_scheduler_brief_entry, latest_scheduler_history, read_scheduler_history
 from .runtime_log import append_runtime_log, clear_runtime_logs, latest_notice, read_runtime_logs
 from .services import (
     dashboard_payload,
@@ -36,7 +39,7 @@ from .services import (
     run_review_drafts,
     run_scrape,
 )
-from .toutiao_publisher import login_toutiao, publish_draft_to_toutiao
+from .toutiao_publisher import ToutiaoPublishError, login_toutiao, publish_draft_to_toutiao
 from .wechat_publisher import ARTICLE_STYLE as PUBLISH_ARTICLE_STYLE
 from .wechat_publisher import _wechat_compatible_html, publish_draft_to_wechat
 
@@ -48,6 +51,8 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 TEMP_DRAFT_ROOT = Path(gettempdir()) / "hotrank_pipeline_drafts"
 _RUN_LOCK = threading.Lock()
 _RUN_STATE = {"running": False, "action": ""}
+
+ensure_scheduler_running(settings)
 
 WECHAT_ARTICLE_STYLE = PUBLISH_ARTICLE_STYLE
 
@@ -67,6 +72,26 @@ def _notify_progress(title: str, lines: list[str], level: str = "info") -> None:
         append_runtime_log("info", f"钉钉通知已发送：{title}")
     else:
         append_runtime_log("warning", f"钉钉通知未发送：{title}（未启用或未配置 webhook）")
+
+
+def _summarize_toutiao_publish_error(exc: Exception) -> tuple[str, str]:
+    if isinstance(exc, ToutiaoPublishError):
+        summary = exc.user_message
+        details: list[str] = []
+        if exc.diagnostic_path:
+            details.append(f"诊断文件：{exc.diagnostic_path}")
+        if exc.screenshot_path:
+            details.append(f"截图：{exc.screenshot_path}")
+        if not details and exc.diagnostics:
+            likely_reason = str(exc.diagnostics.get('likely_reason') or '').strip()
+            if likely_reason and likely_reason != summary:
+                details.append(f"诊断：{likely_reason}")
+        return summary, "｜".join(details)
+    message = str(exc).strip()
+    if "｜" in message:
+        summary, detail = message.split("｜", 1)
+        return summary.strip(), detail.strip()
+    return message or "今日头条发布失败", ""
 
 
 def _set_run_state(running: bool, action: str = "") -> None:
@@ -103,7 +128,7 @@ def _start_background_job(action_name: str, worker) -> bool:
 
 
 def _allowed_local_roots() -> list[Path]:
-    roots = [(ROOT_DIR / "data").resolve(), TEMP_DRAFT_ROOT.resolve()]
+    roots = [(ROOT_DIR / "data").resolve(), TEMP_DRAFT_ROOT.resolve(), _BRIEF_ROOT.resolve()]
     runtime = load_runtime_config(settings)
     draft_output_dir = (runtime.get("draft_output_dir") or "").strip()
     if draft_output_dir:
@@ -265,6 +290,9 @@ def index(request: Request, message: str | None = None, cluster_page: int = 1):
     logs = read_runtime_logs(limit=80)
     notice = latest_notice(logs)
     recent_drafts = fetch_recent_drafts(settings, limit=8)
+    scheduler_state = get_scheduler_state(settings)
+    scheduler_history = read_scheduler_history(limit=8)
+    latest_brief = latest_scheduler_brief_entry() or latest_scheduler_history()
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -285,6 +313,9 @@ def index(request: Request, message: str | None = None, cluster_page: int = 1):
             "runtime_logs": logs,
             "runtime_notice": notice,
             "recent_drafts": recent_drafts,
+            "scheduler_state": scheduler_state,
+            "scheduler_history": scheduler_history,
+            "latest_scheduler_brief": latest_brief,
             **payload,
         },
     )
@@ -329,6 +360,17 @@ def update_config(
     dingtalk_webhook: str = Form(""),
     dingtalk_secret: str = Form(""),
     dingtalk_timeout_seconds: int = Form(10),
+    auto_daily_publish_enabled: str = Form(""),
+    auto_daily_publish_time: str = Form("07:00"),
+    auto_daily_publish_draft_limit: int = Form(10),
+    auto_daily_publish_publish_limit: int = Form(4),
+    auto_daily_publish_retry_count: int = Form(2),
+    auto_daily_publish_enable_wechat: str = Form(""),
+    auto_daily_publish_enable_toutiao: str = Form(""),
+    auto_daily_publish_notify_on_scrape: str = Form(""),
+    auto_daily_publish_notify_on_draft_generated: str = Form(""),
+    auto_daily_publish_notify_on_publish_finished: str = Form(""),
+    auto_daily_publish_preference_keywords: str = Form(""),
     image_prefer_ai_generated: str = Form(""),
     image_fallback_to_source: str = Form(""),
     image_fallback_to_web_search: str = Form(""),
@@ -441,15 +483,31 @@ def update_config(
     elif "secret" not in runtime["notifications"]["dingtalk"]:
         runtime["notifications"]["dingtalk"]["secret"] = ""
     runtime["notifications"]["dingtalk"]["timeout_seconds"] = max(3, min(int(dingtalk_timeout_seconds), 30))
+    runtime.setdefault("automation", {})
+    runtime["automation"]["daily_publish"] = {
+        "enabled": auto_daily_publish_enabled == "on",
+        "schedule_time": auto_daily_publish_time.strip() or "07:00",
+        "draft_limit": max(1, min(int(auto_daily_publish_draft_limit), 30)),
+        "publish_limit": max(1, min(int(auto_daily_publish_publish_limit), 10)),
+        "retry_count": max(1, min(int(auto_daily_publish_retry_count), 5)),
+        "enable_wechat": auto_daily_publish_enable_wechat == "on",
+        "enable_toutiao": auto_daily_publish_enable_toutiao == "on",
+        "notify_on_scrape": auto_daily_publish_notify_on_scrape == "on",
+        "notify_on_draft_generated": auto_daily_publish_notify_on_draft_generated == "on",
+        "notify_on_publish_finished": auto_daily_publish_notify_on_publish_finished == "on",
+        "preference_keywords": [part.strip() for part in re.split(r"[\r\n,，]+", auto_daily_publish_preference_keywords) if part.strip()],
+    }
     save_runtime_config(settings, runtime)
     append_runtime_log(
         "success",
         (
             f"配置已保存：模型={runtime['llm']['model']}；"
             f"配图={'AI优先' if runtime['images']['prefer_ai_generated'] else '原文取图'}；"
-            f"钉钉={'已启用' if runtime['notifications']['dingtalk']['enabled'] else '未启用'}"
+            f"钉钉={'已启用' if runtime['notifications']['dingtalk']['enabled'] else '未启用'}；"
+            f"自动任务={'已启用' if runtime['automation']['daily_publish']['enabled'] else '未启用'}"
         ),
     )
+    scheduler_state = get_scheduler_state(settings)
     _notify_progress(
         "配置已保存",
         [
@@ -462,8 +520,22 @@ def update_config(
             f"头条声明：{' / '.join(runtime['toutiao']['publish_options']['statement_labels'])}",
             f"钉钉通知：{'已启用' if runtime['notifications']['dingtalk']['enabled'] else '未启用'}",
             f"钉钉超时：{runtime['notifications']['dingtalk']['timeout_seconds']} 秒",
+            f"自动任务：{'已开启' if runtime['automation']['daily_publish']['enabled'] else '未开启'}",
+            f"自动执行时间：{runtime['automation']['daily_publish']['schedule_time']}",
+            f"自动抓取成稿：{runtime['automation']['daily_publish']['draft_limit']} 篇",
+            f"自动推送发布：{runtime['automation']['daily_publish']['publish_limit']} 篇",
+            f"自动任务重试：{runtime['automation']['daily_publish']['retry_count']} 次",
+            f"自动任务渠道：{'公众号' if runtime['automation']['daily_publish']['enable_wechat'] else ''}{' + ' if runtime['automation']['daily_publish']['enable_wechat'] and runtime['automation']['daily_publish']['enable_toutiao'] else ''}{'头条' if runtime['automation']['daily_publish']['enable_toutiao'] else ''}".strip() or '未启用',
+            f"偏好关键词：{' / '.join(runtime['automation']['daily_publish']['preference_keywords']) if runtime['automation']['daily_publish']['preference_keywords'] else '未设置'}",
         ],
         level="success",
+    )
+    append_runtime_log(
+        "info",
+        (
+            f"自动任务状态已刷新：time={scheduler_state['time']}｜"
+            f"draft_limit={scheduler_state['draft_limit']}｜publish_limit={scheduler_state['publish_limit']}"
+        ),
     )
     return RedirectResponse(url="/?message=配置已保存", status_code=303)
 
@@ -505,6 +577,51 @@ def action_cleanup_hotspots(retention_days: int = Form(2), include_drafts: str =
         + (f"，同步删除旧初稿 {result.get('deleted_draft_count', 0)} 篇" if cleanup_drafts else "")
     )
     return RedirectResponse(url=f"/?message={quote(message)}", status_code=303)
+
+
+@app.post("/actions/auto-daily-publish-run-now")
+def action_auto_daily_publish_run_now():
+    scheduler_state = get_scheduler_state(settings)
+    started = trigger_daily_publish_now(settings)
+    if not started:
+        message = "自动任务已有运行中，本次手动触发已跳过"
+        append_runtime_log(
+            "warning",
+            (
+                f"{message}：schedule={scheduler_state['time']}｜"
+                f"draft_limit={scheduler_state['draft_limit']}｜publish_limit={scheduler_state['publish_limit']}"
+            ),
+            source="scheduler",
+        )
+        _notify_progress(
+            "自动任务未重复启动",
+            [
+                "已有一轮自动任务正在执行，本次手动触发已跳过。",
+                f"计划执行时间：{scheduler_state['time']}",
+                f"本次生成配置：{scheduler_state['draft_limit']} 篇",
+                f"本次推送配置：{scheduler_state['publish_limit']} 篇",
+            ],
+            level="warning",
+        )
+        return RedirectResponse(url=f"/?message={quote(message)}", status_code=303)
+    append_runtime_log(
+        "info",
+        (
+            f"已手动触发自动任务：schedule={scheduler_state['time']}｜"
+            f"draft_limit={scheduler_state['draft_limit']}｜publish_limit={scheduler_state['publish_limit']}"
+        ),
+        source="scheduler",
+    )
+    _notify_progress(
+        "已手动触发自动任务",
+        [
+            f"计划执行时间：{scheduler_state['time']}",
+            f"本次生成：{scheduler_state['draft_limit']} 篇",
+            f"本次推送：{scheduler_state['publish_limit']} 篇",
+        ],
+        level="info",
+    )
+    return RedirectResponse(url="/?message=已手动触发自动任务", status_code=303)
 
 
 @app.post("/actions/manual-topic")
@@ -914,9 +1031,20 @@ def publish_editor_toutiao(draft_id: int):
     try:
         result = publish_draft_to_toutiao(settings, draft_id)
     except Exception as exc:
-        append_runtime_log("error", f"今日头条发布失败：draft_id={draft_id}｜{exc}")
+        summary, details = _summarize_toutiao_publish_error(exc)
+        append_runtime_log("error", f"今日头条发布失败：draft_id={draft_id}｜{summary}")
+        _notify_progress(
+            "今日头条发布失败",
+            [
+                f"稿件：{title[:60]}",
+                f"原因：{summary}",
+                *( [details] if details else [] ),
+            ],
+            level="error",
+        )
+        error_text = summary if not details else f"{summary}｜{details}"
         return RedirectResponse(
-            url=f"/editor?draft_id={draft_id}&toutiao_publish=failed&error={quote(str(exc))}",
+            url=f"/editor?draft_id={draft_id}&toutiao_publish=failed&error={quote(error_text)}",
             status_code=303,
         )
     if result.get("already_uploaded"):
@@ -942,15 +1070,15 @@ def publish_editor_toutiao(draft_id: int):
     append_runtime_log(
         "success",
         (
-            f"今日头条发布成功：draft_id={draft_id}｜"
+            f"今日头条提交流程成功：draft_id={draft_id}｜"
             f"标题={result['toutiao_title']}｜正文={result['content_mode']}｜插图={result['inline_image_count']}｜"
             f"封面={result.get('cover_mode') or '未知'}｜"
             f"发布方式={result.get('publish_mode') or 'unknown'}｜"
-            f"校验={'已通过' if result.get('verified') else '未校验'}"
+            f"状态={result.get('status_desc') or ('已发布' if result.get('published') else '已提交')}"
         ),
     )
     _notify_progress(
-        "今日头条已发布",
+        "今日头条已提交",
         [
             f"稿件：{result['toutiao_title']}",
             f"正文写入方式：{result['content_mode']}",
@@ -959,7 +1087,8 @@ def publish_editor_toutiao(draft_id: int):
             f"合集：{result.get('collection_name') or '未设置'}",
             f"作品声明：{' / '.join(result.get('statement_labels') or []) or '未设置'}",
             f"发布方式：{result.get('publish_mode') or 'unknown'}",
-            f"发布校验：{'通过' if result.get('verified') else '未校验到'}",
+            f"平台状态：{result.get('status_desc') or ('已发布' if result.get('published') else '已提交审核')}",
+            f"article_id：{result.get('article_id') or '未记录'}",
         ],
         level="success",
     )

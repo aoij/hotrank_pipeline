@@ -97,7 +97,11 @@
     "headless": false,
     "login_wait_seconds": 180,
     "publish_timeout_seconds": 240,
-    "title_char_limit": 100,
+    "publish_total_timeout_seconds": 360,
+    "publish_lock_wait_seconds": 900,
+    "publish_verify_retries": 3,
+    "publish_verify_retry_interval_seconds": 4,
+    "title_char_limit": 30,
     "max_inline_images": 6,
     "verify_list_limit": 20,
     "auto_open_login_on_publish": true,
@@ -111,6 +115,21 @@
       "webhook": "",
       "secret": "",
       "timeout_seconds": 10
+    }
+  },
+  "automation": {
+    "daily_publish": {
+      "enabled": false,
+      "schedule_time": "07:00",
+      "draft_limit": 10,
+      "publish_limit": 4,
+      "retry_count": 2,
+      "enable_wechat": true,
+      "enable_toutiao": true,
+      "notify_on_scrape": true,
+      "notify_on_draft_generated": true,
+      "notify_on_publish_finished": true,
+      "preference_keywords": []
     }
   },
   "hotspot_cleanup": {

@@ -6,6 +6,7 @@ import json
 import re
 import os
 import shutil
+import time
 from pathlib import Path
 from datetime import datetime
 from tempfile import gettempdir
@@ -25,11 +26,52 @@ TOUTIAO_LOGIN_URL = "https://mp.toutiao.com/auth/page/login"
 TOUTIAO_PUBLISH_URL = "https://mp.toutiao.com/profile_v4/graphic/publish"
 TOUTIAO_LIST_API = "https://mp.toutiao.com/mp/agw/article/list/"
 TOUTIAO_PUBLISH_API = "https://mp.toutiao.com/mp/agw/article/publish"
-DEFAULT_TITLE_CHAR_LIMIT = 100
+DEFAULT_TITLE_CHAR_LIMIT = 30
 DEFAULT_MAX_INLINE_IMAGES = 6
 DEFAULT_VERIFY_LIST_LIMIT = 20
 DEFAULT_TOUTIAO_COLLECTION_NAME = "这事和你有关"
 DEFAULT_TOUTIAO_STATEMENT_LABELS = ["个人观点，仅供参考"]
+DEFAULT_PUBLISH_LOCK_WAIT_SECONDS = 900
+DEFAULT_PUBLISH_LOCK_STALE_SECONDS = 1800
+RECOVERABLE_AFTER_PUBLISH_STAGES = {
+    "click_publish",
+    "wait_publish_response",
+    "check_success_toast",
+    "verify_article_list",
+    "build_failure_diagnostic",
+    "mark_uploaded",
+}
+
+
+class ToutiaoPublishError(RuntimeError):
+    def __init__(
+        self,
+        user_message: str,
+        *,
+        diagnostics: dict[str, Any] | None = None,
+        diagnostic_path: str = "",
+        screenshot_path: str = "",
+        retryable: bool = True,
+    ) -> None:
+        self.user_message = (user_message or "今日头条发布失败").strip()
+        self.diagnostics = diagnostics or {}
+        self.diagnostic_path = (diagnostic_path or "").strip()
+        self.screenshot_path = (screenshot_path or "").strip()
+        self.retryable = bool(retryable)
+        super().__init__(self.user_message)
+
+    def with_screenshot(self, screenshot_path: str) -> "ToutiaoPublishError":
+        if screenshot_path and not self.screenshot_path:
+            self.screenshot_path = screenshot_path
+        return self
+
+    def __str__(self) -> str:
+        parts = [self.user_message]
+        if self.diagnostic_path:
+            parts.append(f"诊断文件：{self.diagnostic_path}")
+        if self.screenshot_path:
+            parts.append(f"截图：{self.screenshot_path}")
+        return "｜".join(parts)
 
 
 def _toutiao_config(settings: Settings) -> dict[str, Any]:
@@ -47,13 +89,33 @@ def _toutiao_config(settings: Settings) -> dict[str, Any]:
     profile_dir = raw.get("browser_profile_dir") or str(
         Path(__file__).resolve().parents[2] / "data" / "browser_profiles" / "toutiao"
     )
+    publish_timeout_seconds = max(30, min(int(raw.get("publish_timeout_seconds") or 240), 900))
+    publish_total_timeout_seconds = max(
+        publish_timeout_seconds + 60,
+        min(int(raw.get("publish_total_timeout_seconds") or 360), 1200),
+    )
+    publish_lock_wait_seconds = max(
+        10,
+        min(int(raw.get("publish_lock_wait_seconds") or DEFAULT_PUBLISH_LOCK_WAIT_SECONDS), 1800),
+    )
+    publish_verify_retries = max(1, min(int(raw.get("publish_verify_retries") or 3), 8))
+    publish_verify_retry_interval_seconds = max(
+        1,
+        min(int(raw.get("publish_verify_retry_interval_seconds") or 4), 20),
+    )
     return {
         "channel": (raw.get("channel") or "chrome").strip() or "chrome",
         "browser_profile_dir": profile_dir,
         "headless": bool(raw.get("headless", False)),
         "login_wait_seconds": max(30, min(int(raw.get("login_wait_seconds") or 180), 900)),
-        "publish_timeout_seconds": max(30, min(int(raw.get("publish_timeout_seconds") or 240), 900)),
-        "title_char_limit": max(20, min(int(raw.get("title_char_limit") or DEFAULT_TITLE_CHAR_LIMIT), 200)),
+        "publish_timeout_seconds": publish_timeout_seconds,
+        "publish_total_timeout_seconds": publish_total_timeout_seconds,
+        "publish_lock_wait_seconds": publish_lock_wait_seconds,
+        "publish_verify_retries": publish_verify_retries,
+        "publish_verify_retry_interval_seconds": publish_verify_retry_interval_seconds,
+        # 头条图文发布页实际按 30 个中文字符校验；超过后会出现 “31 / 30” 并导致 7050 保存失败。
+        # 即使 local_settings 里历史配置为 100，也在发布链路强制收敛到平台上限，避免自动任务卡在保存失败。
+        "title_char_limit": max(20, min(int(raw.get("title_char_limit") or DEFAULT_TITLE_CHAR_LIMIT), DEFAULT_TITLE_CHAR_LIMIT)),
         "max_inline_images": max(0, min(int(raw.get("max_inline_images") or DEFAULT_MAX_INLINE_IMAGES), 12)),
         "verify_list_limit": max(5, min(int(raw.get("verify_list_limit") or DEFAULT_VERIFY_LIST_LIMIT), 50)),
         "auto_open_login_on_publish": bool(raw.get("auto_open_login_on_publish", True)),
@@ -78,11 +140,107 @@ def _toutiao_config(settings: Settings) -> dict[str, Any]:
     }
 
 
+class _ToutiaoPublishFileLock:
+    """跨线程/跨进程发布锁，避免多个入口同时抢同一个头条浏览器登录态。"""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        debug_dir = Path(config["debug_dir"]).resolve()
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        self.path = debug_dir / "toutiao_publish.lock"
+        self.timeout_seconds = int(config.get("publish_lock_wait_seconds") or DEFAULT_PUBLISH_LOCK_WAIT_SECONDS)
+        self.stale_seconds = DEFAULT_PUBLISH_LOCK_STALE_SECONDS
+        self.fd: int | None = None
+
+    def _lock_payload(self) -> str:
+        payload = {
+            "pid": os.getpid(),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    def _read_existing(self) -> str:
+        try:
+            return self.path.read_text(encoding="utf-8")[:300]
+        except Exception:
+            return ""
+
+    def _remove_stale_if_needed(self) -> None:
+        try:
+            age_seconds = time.time() - self.path.stat().st_mtime
+        except FileNotFoundError:
+            return
+        except Exception:
+            return
+        if age_seconds >= self.stale_seconds:
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
+    def __enter__(self) -> "_ToutiaoPublishFileLock":
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            self._remove_stale_if_needed()
+            try:
+                self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self.fd, self._lock_payload().encode("utf-8"))
+                return self
+            except FileExistsError:
+                if time.monotonic() >= deadline:
+                    existing = self._read_existing()
+                    raise ToutiaoPublishError(
+                        "今日头条已有发布任务正在执行，已为避免浏览器登录态冲突而停止本次发布；"
+                        f"请稍后重试。锁文件：{self.path}"
+                        + (f"｜当前锁：{existing}" if existing else ""),
+                        retryable=True,
+                    )
+                time.sleep(1)
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except Exception:
+                pass
+            self.fd = None
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+
 def _toutiao_title(title: str, char_limit: int = DEFAULT_TITLE_CHAR_LIMIT) -> str:
     clean = re.sub(r"\s+", " ", (title or "").strip()).strip("“”\"'")
     if len(clean) <= char_limit:
         return clean
     return clean[:char_limit].rstrip("，。！？、；：…-— ") or clean[:char_limit]
+
+
+def _existing_uploaded_payload(config: dict[str, Any], draft_id: int, draft: dict[str, Any]) -> dict[str, Any]:
+    archive_title = draft.get("title") or draft.get("canonical_title") or f"draft_id={draft_id}"
+    return {
+        "draft_id": draft_id,
+        "title": draft.get("title"),
+        "toutiao_title": _toutiao_title(archive_title, char_limit=config["title_char_limit"]),
+        "inline_image_count": 0,
+        "content_mode": "existing",
+        "content_length": len(draft.get("content_md") or ""),
+        "editor_image_count": 0,
+        "cover_count": 0,
+        "cover_uploaded": False,
+        "success_toast": "",
+        "publish_events": [],
+        "verified": bool(draft.get("toutiao_article_id")),
+        "verified_status": "existing",
+        "article_id": draft.get("toutiao_article_id"),
+        "browser_profile_dir": config["browser_profile_dir"],
+        "already_uploaded": True,
+        "uploaded_at_text": draft.get("toutiao_uploaded_at_text") or "",
+    }
 
 
 def _strip_first_h1(soup: BeautifulSoup) -> None:
@@ -258,6 +416,13 @@ def _debug_path(config: dict[str, Any], prefix: str) -> Path:
     debug_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return debug_dir / f"{stamp}_{prefix}.png"
+
+
+def _debug_json_path(config: dict[str, Any], prefix: str) -> Path:
+    debug_dir = Path(config["debug_dir"]).resolve()
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return debug_dir / f"{stamp}_{prefix}.json"
 
 
 async def _capture_debug_screenshot(page: Page | None, config: dict[str, Any], prefix: str) -> str:
@@ -477,6 +642,12 @@ async def launch_toutiao_login(settings: Settings) -> dict[str, Any]:
         await _close_context(context)
 
 
+def _can_recover_after_publish(state: dict[str, Any]) -> bool:
+    if str(state.get("stage") or "") in RECOVERABLE_AFTER_PUBLISH_STAGES:
+        return True
+    return bool(state.get("publish_clicked"))
+
+
 def login_toutiao(settings: Settings) -> dict[str, Any]:
     return asyncio.run(launch_toutiao_login(settings))
 
@@ -496,15 +667,113 @@ async def _dismiss_masks(page: Page) -> None:
         pass
 
 
+async def _write_plain_clipboard(page: Page, text: str) -> bool:
+    try:
+        await page.evaluate(
+            """async (value) => {
+                try {
+                    if (!navigator.clipboard || !window.ClipboardItem) return false;
+                    await navigator.clipboard.write([
+                        new ClipboardItem({
+                            'text/plain': new Blob([value], { type: 'text/plain' }),
+                        }),
+                    ]);
+                    return true;
+                } catch (err) {
+                    return false;
+                }
+            }""",
+            text,
+        )
+        return True
+    except Exception:
+        return False
+
+
+async def _context_menu_paste_text(page: Page, locator, expected_text: str) -> str:
+    await locator.click(timeout=3000)
+    await page.keyboard.press("Control+A")
+    await page.keyboard.press("Delete")
+    await page.wait_for_timeout(150)
+    try:
+        await locator.click(button="right", timeout=3000)
+        await page.wait_for_timeout(500)
+        paste_item = page.locator(
+            "text=粘贴, [role='menuitem']:has-text('粘贴'), li:has-text('粘贴'), button:has-text('粘贴')"
+        ).first
+        if await paste_item.count():
+            await paste_item.click(timeout=3000)
+        else:
+            await page.keyboard.press("Control+V")
+    except Exception:
+        await page.keyboard.press("Control+V")
+    await page.wait_for_timeout(500)
+    try:
+        return (await locator.input_value()).strip()
+    except Exception:
+        return expected_text.strip()
+
+
+async def _wait_publish_editor_ready(page: Page, timeout_seconds: int = 30) -> None:
+    title_box = page.locator("textarea[placeholder*='标题'], textarea[placeholder*='文章标题']").first
+    skeleton = page.locator(
+        ".publish-content [class*='skeleton'], .publish-content [class*='loading'], "
+        ".article-edit [class*='skeleton'], .article-edit [class*='loading'], "
+        ".byte-loading, .vc-spin, .semi-spin"
+    ).first
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(5, timeout_seconds)
+    last_error = ""
+
+    await title_box.wait_for(state="visible", timeout=max(5000, timeout_seconds * 1000))
+
+    while loop.time() < deadline:
+        await _dismiss_masks(page)
+        try:
+            has_skeleton = await skeleton.count() > 0 and await skeleton.is_visible()
+        except Exception:
+            has_skeleton = False
+        if has_skeleton:
+            await page.wait_for_timeout(800)
+            continue
+
+        try:
+            probe = "就绪检测"
+            if not await _write_plain_clipboard(page, probe):
+                await title_box.click(timeout=2000)
+                await page.keyboard.press("Control+A")
+                await page.keyboard.press("Delete")
+                await page.keyboard.type(probe, delay=20)
+                await page.wait_for_timeout(300)
+                current = (await title_box.input_value()).strip()
+            else:
+                current = await _context_menu_paste_text(page, title_box, probe)
+            if current == probe:
+                await page.keyboard.press("Control+A")
+                await page.keyboard.press("Delete")
+                await page.wait_for_timeout(200)
+                return
+            last_error = f"标题框当前不可写入，检测值={current or '空'}"
+        except Exception as exc:
+            last_error = str(exc)
+        await page.wait_for_timeout(800)
+
+    raise RuntimeError(f"头条发布页编辑器长时间未就绪（超过 {timeout_seconds} 秒）{('：' + last_error) if last_error else ''}")
+
+
 async def _fill_title(page: Page, title: str) -> str:
     title_box = page.locator("textarea[placeholder*='标题'], textarea[placeholder*='文章标题']").first
     await title_box.wait_for(state="visible", timeout=30000)
-    await title_box.click()
-    await page.keyboard.press("Control+A")
-    await page.keyboard.press("Delete")
-    await page.keyboard.type(title, delay=25)
-    await page.wait_for_timeout(600)
-    current = (await title_box.input_value()).strip()
+    current = ""
+    if await _write_plain_clipboard(page, title):
+        current = await _context_menu_paste_text(page, title_box, title)
+    if current != title.strip():
+        await title_box.click()
+        await page.keyboard.press("Control+A")
+        await page.keyboard.press("Delete")
+        await page.keyboard.type(title, delay=25)
+        await page.wait_for_timeout(600)
+        current = (await title_box.input_value()).strip()
     if current != title.strip():
         await title_box.fill(title)
         await page.wait_for_timeout(400)
@@ -580,6 +849,20 @@ async def _fill_content(page: Page, html: str, plain_text: str) -> dict[str, Any
         "expected_image_count": expected_image_count,
         "actual_image_count": await page.locator(f"{editor_selector} img").count(),
     }
+
+
+async def _wait_after_initial_edit(page: Page, timeout_seconds: int = 12) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(3, timeout_seconds)
+    while loop.time() < deadline:
+        await _dismiss_masks(page)
+        try:
+            body_text = await page.locator("body").inner_text(timeout=2000)
+        except Exception:
+            body_text = ""
+        if "保存失败" not in body_text and "保存中" not in body_text:
+            return
+        await page.wait_for_timeout(800)
 
 
 async def _upload_cover(page: Page, cover_paths: list[Path], *, expected_count: int = 1) -> bool:
@@ -899,21 +1182,77 @@ async def _query_article_list(page: Page, *, status: str, page_size: int) -> dic
     )
 
 
-def _is_published_article(article: dict[str, Any]) -> bool:
+def _classify_article_submission(article: dict[str, Any]) -> dict[str, Any]:
     status_desc = str(article.get("status_desc") or "")
     status = article.get("status")
     pgc_status = article.get("pgc_status")
     is_draft = bool(article.get("is_draft"))
     is_passed = bool(article.get("is_passed"))
-    return (
+    published = (
         ("发布" in status_desc and "草稿" not in status_desc)
         or status == 3
         or pgc_status == 3
         or (not is_draft and is_passed)
     )
+    submitted = published or (
+        not is_draft
+        and (
+            status in {6}
+            or pgc_status in {6}
+            or any(token in status_desc for token in ("审核中", "待审核", "待发布", "提交"))
+        )
+    )
+    if published:
+        submission_state = "published"
+    elif submitted:
+        submission_state = "submitted"
+    else:
+        submission_state = "draft"
+    return {
+        "published": published,
+        "submitted": submitted,
+        "submission_state": submission_state,
+        "status_desc": status_desc,
+        "status": status,
+        "pgc_status": pgc_status,
+        "is_draft": is_draft,
+        "is_passed": is_passed,
+    }
 
 
-async def _verify_article_published(page: Page, title: str, verify_list_limit: int) -> dict[str, Any]:
+def _is_published_article(article: dict[str, Any]) -> bool:
+    return bool(_classify_article_submission(article)["published"])
+
+
+def _article_time_value(article: dict[str, Any]) -> int:
+    candidates = (
+        "create_time",
+        "modify_time",
+        "publish_time",
+        "pop_create_time",
+        "pop_create_time_ms",
+    )
+    for key in candidates:
+        raw = article.get(key)
+        try:
+            value = int(float(raw))
+        except Exception:
+            continue
+        if key.endswith("_ms") or value > 10_000_000_000:
+            value = value // 1000
+        if value > 0:
+            return value
+    return 0
+
+
+async def _verify_article_published(
+    page: Page,
+    title: str,
+    verify_list_limit: int,
+    *,
+    min_create_time: int | None = None,
+    require_recent: bool = False,
+) -> dict[str, Any]:
     requests_to_try = [
         {"status": "all", "page_size": verify_list_limit},
         {"status": "draft", "page_size": verify_list_limit},
@@ -931,7 +1270,13 @@ async def _verify_article_published(page: Page, title: str, verify_list_limit: i
                 article_title = (article.get("title") or "").strip()
                 if article_title != title:
                     continue
-                published = _is_published_article(article)
+                article_time = _article_time_value(article)
+                if min_create_time:
+                    if require_recent and article_time < min_create_time:
+                        continue
+                    if not require_recent and article_time and article_time < min_create_time:
+                        continue
+                article_state = _classify_article_submission(article)
                 article_id = (
                     article.get("group_id")
                     or article.get("article_id")
@@ -940,17 +1285,137 @@ async def _verify_article_published(page: Page, title: str, verify_list_limit: i
                     or article.get("id")
                 )
                 return {
-                    "verified": published,
+                    "verified": bool(article_state["submitted"]),
+                    "published": bool(article_state["published"]),
+                    "submitted": bool(article_state["submitted"]),
+                    "submission_state": article_state["submission_state"],
                     "status": req["status"],
                     "article_id": article_id,
                     "matched_title": article_title,
-                    "status_desc": article.get("status_desc") or "",
-                    "is_draft": bool(article.get("is_draft")),
+                    "status_desc": article_state["status_desc"],
+                    "is_draft": bool(article_state["is_draft"]),
+                    "article_time": article_time,
+                    "min_create_time": min_create_time,
                     "api_url": payload.get("url"),
                 }
         except Exception:
             continue
     return {"verified": False}
+
+
+async def _verify_article_published_with_retries(
+    page: Page,
+    title: str,
+    config: dict[str, Any],
+    *,
+    min_create_time: int | None = None,
+    require_recent: bool = False,
+) -> dict[str, Any]:
+    attempts = max(1, int(config.get("publish_verify_retries") or 1))
+    interval_seconds = max(1, int(config.get("publish_verify_retry_interval_seconds") or 1))
+    per_attempt_timeout = min(30, max(10, int(config.get("publish_timeout_seconds") or 240) // 4))
+    verify_list_limit = int(config.get("verify_list_limit") or DEFAULT_VERIFY_LIST_LIMIT)
+    last_result: dict[str, Any] = {"verified": False}
+
+    for attempt in range(1, attempts + 1):
+        try:
+            result = await asyncio.wait_for(
+                _verify_article_published(
+                    page,
+                    title,
+                    verify_list_limit,
+                    min_create_time=min_create_time,
+                    require_recent=require_recent,
+                ),
+                timeout=per_attempt_timeout,
+            )
+        except asyncio.TimeoutError:
+            result = {
+                "verified": False,
+                "status": "verify_timeout",
+                "status_desc": "发布后列表校验超时",
+            }
+        except Exception as exc:
+            result = {
+                "verified": False,
+                "status": "verify_error",
+                "status_desc": str(exc)[:300],
+            }
+
+        result["verify_attempt"] = attempt
+        result["verify_attempts"] = attempts
+        last_result = result
+        if result.get("submitted") or result.get("verified"):
+            return result
+        if attempt < attempts:
+            await asyncio.sleep(interval_seconds)
+
+    return last_result
+
+
+def _result_from_verified_article(
+    settings: Settings,
+    config: dict[str, Any],
+    draft: dict[str, Any],
+    draft_id: int,
+    title: str,
+    verify_result: dict[str, Any],
+    *,
+    recovered_after_error: bool = False,
+    error_text: str = "",
+) -> dict[str, Any]:
+    article_id = verify_result.get("article_id")
+    mark_draft_toutiao_uploaded(settings, draft_id, article_id)
+    return {
+        "draft_id": draft_id,
+        "title": draft.get("title"),
+        "toutiao_title": title,
+        "inline_image_count": 0,
+        "content_mode": "recovered_after_error" if recovered_after_error else "verified",
+        "content_length": len(draft.get("content_md") or ""),
+        "editor_image_count": 0,
+        "cover_count": 0,
+        "cover_uploaded": False,
+        "cover_mode": "",
+        "success_toast": "",
+        "publish_events": [],
+        "publish_mode": "recovered_after_error" if recovered_after_error else "verified",
+        "verified": True,
+        "verified_status": verify_result.get("status"),
+        "published": bool(verify_result.get("published")),
+        "submitted": bool(verify_result.get("submitted") or verify_result.get("verified")),
+        "submission_state": verify_result.get("submission_state") or "submitted",
+        "status_desc": verify_result.get("status_desc") or "",
+        "article_id": article_id,
+        "ad_enabled": bool((config.get("publish_options") or {}).get("ad_enabled", True)),
+        "claim_exclusive": bool((config.get("publish_options") or {}).get("claim_exclusive", False)),
+        "collection_name": str((config.get("publish_options") or {}).get("collection_name") or ""),
+        "statement_labels": (config.get("publish_options") or {}).get("statement_labels") or [],
+        "publish_more_income": bool((config.get("publish_options") or {}).get("publish_more_income", False)),
+        "browser_profile_dir": config["browser_profile_dir"],
+        "already_uploaded": False,
+        "recovered_after_error": recovered_after_error,
+        "recovered_error": error_text,
+    }
+
+
+async def _click_locator_with_fallback(page: Page, locator, *, label: str) -> None:
+    await locator.scroll_into_view_if_needed(timeout=5000)
+    try:
+        await locator.click(timeout=15000)
+    except Exception:
+        try:
+            await locator.evaluate("(el) => el.click()")
+        except Exception:
+            box = await locator.bounding_box()
+            if not box:
+                raise RuntimeError(f"按钮“{label}”可见但无法获取可点击区域")
+            click_x = box["x"] + box["width"] / 2
+            click_y = box["y"] + box["height"] / 2
+            await page.mouse.move(click_x, click_y)
+            await page.mouse.down()
+            await page.mouse.up()
+    await page.wait_for_timeout(2500)
 
 
 async def _click_publish_button(page: Page, selectors: list[str], *, label: str) -> bool:
@@ -959,8 +1424,7 @@ async def _click_publish_button(page: Page, selectors: list[str], *, label: str)
         try:
             button = page.locator(selector).first
             await button.wait_for(state="visible", timeout=15000)
-            await button.click(timeout=15000)
-            await page.wait_for_timeout(2500)
+            await _click_locator_with_fallback(page, button, label=label)
             return True
         except Exception as exc:
             last_error = exc
@@ -972,11 +1436,17 @@ async def _click_publish_button(page: Page, selectors: list[str], *, label: str)
 
 async def _trigger_article_publish(page: Page) -> str:
     confirm_selectors = [
+        "button.publish-btn.publish-btn-last:has-text('确认发布')",
         "button:has-text('确认发布')",
         "[role='button']:has-text('确认发布')",
         "text=确认发布",
     ]
-    preview_selectors = [
+    primary_publish_selectors = [
+        ".publish-footer button.publish-btn.publish-btn-last",
+        "button.publish-btn.publish-btn-last:has-text('发布')",
+        "button.publish-btn.publish-btn-last:has-text('预览并发布')",
+    ]
+    compatibility_selectors = [
         "button:has-text('预览并发布')",
         "[role='button']:has-text('预览并发布')",
         "button:has-text('发布')",
@@ -992,19 +1462,22 @@ async def _trigger_article_publish(page: Page) -> str:
     except Exception:
         pass
 
-    await _click_publish_button(page, preview_selectors, label="预览并发布")
+    try:
+        await _click_publish_button(page, primary_publish_selectors, label="底部发布")
+    except Exception:
+        await _click_publish_button(page, compatibility_selectors, label="预览并发布")
 
-    for _ in range(10):
+    for _ in range(16):
         try:
             confirm_button = page.locator(confirm_selectors[0]).first
             if await confirm_button.count() and await confirm_button.is_visible():
                 await _click_publish_button(page, confirm_selectors, label="确认发布")
-                return "preview_then_confirm"
+                return "publish_then_confirm"
         except Exception:
             pass
         await page.wait_for_timeout(600)
 
-    return "preview_only"
+    return "publish_only"
 
 
 async def _check_success_toast(page: Page) -> str:
@@ -1219,84 +1692,224 @@ def _extract_article_id_from_publish_event(event: dict[str, Any] | None) -> str 
     return _find_first_value_by_keys(payload, ("group_id", "article_id", "pgc_id", "item_id", "id"))
 
 
-async def _build_publish_failure_details(
-    page: Page,
-    publish_events: list[dict[str, Any]],
-) -> str:
-    page_hints = await _collect_publish_page_hints(page)
-    account_diag = await _collect_publish_account_diagnostics(page)
-    last_event = publish_events[-1] if publish_events else {}
-    request_summary = last_event.get("request") or {}
-    response_text = last_event.get("response_text") or ""
-    compact_diag = {
-        "page": page_hints,
-        "request": request_summary,
-        "response": response_text[:240],
-        "likely_reason": "",
-        "account": {
-            "media_status": account_diag.get("media_status"),
-            "has_already_authentication": account_diag.get("has_already_authentication"),
-            "is_new_register": account_diag.get("is_new_register"),
-            "show_creation_btn": account_diag.get("show_creation_btn"),
-            "jingxuan_account_check": account_diag.get("jingxuan_account_check"),
-            "media_project": account_diag.get("media_project"),
-        },
+def _safe_json_loads(raw: str) -> Any:
+    try:
+        return json.loads(raw or "")
+    except Exception:
+        return None
+
+
+def _compact_account_diag(account_diag: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "media_status": account_diag.get("media_status"),
+        "has_already_authentication": account_diag.get("has_already_authentication"),
+        "is_new_register": account_diag.get("is_new_register"),
+        "show_creation_btn": account_diag.get("show_creation_btn"),
+        "jingxuan_account_check": account_diag.get("jingxuan_account_check"),
+        "media_project": account_diag.get("media_project"),
     }
+
+
+def _account_readiness_issue(account_diag: dict[str, Any], *, include_soft: bool = True) -> str:
     jingxuan = account_diag.get("jingxuan_account_check") or {}
     jingxuan_data = jingxuan.get("data") if isinstance(jingxuan, dict) else {}
     verified = jingxuan_data.get("verified") if isinstance(jingxuan_data, dict) else {}
     account_info = jingxuan_data.get("account") if isinstance(jingxuan_data, dict) else {}
     media_project = account_diag.get("media_project") or {}
+
     verified_finish = verified.get("finish") if isinstance(verified, dict) else None
     account_finish = account_info.get("finish") if isinstance(account_info, dict) else None
     project_code = media_project.get("code") if isinstance(media_project, dict) else None
+    project_message = ""
+    if isinstance(media_project, dict):
+        project_message = str(media_project.get("message") or media_project.get("reason") or "").strip()
+    project_message_lower = project_message.lower()
+
     if account_diag.get("has_already_authentication") is False or verified_finish is False:
-        compact_diag["likely_reason"] = (
-            "当前头条号实名认证状态未完全就绪，平台虽然允许进入发文页，但自动保存接口统一返回 7050。"
+        return "头条号实名认证状态未完全就绪，请先在头条号后台完成认证后再重试。"
+    if include_soft and account_finish is False:
+        return "头条号创作项目未初始化完成（account.finish=false），请先在头条号后台手动完成一次创作项目开通后再重试。"
+    if include_soft and (
+        project_code not in (None, 0)
+        or "proj_id" in project_message_lower
+        or ("project" in project_message_lower and "nil" in project_message_lower)
+    ):
+        return "头条号创作项目未初始化完成（get proj_id nil / media_project 异常），请先在头条号后台手动完成一次创作项目开通后再重试。"
+    return ""
+
+
+def _response_summary_from_event(event: dict[str, Any]) -> dict[str, Any]:
+    payload = _safe_json_loads(event.get("response_text") or "")
+    if isinstance(payload, dict):
+        return {
+            "code": payload.get("code", payload.get("err_no")),
+            "message": payload.get("message") or payload.get("errmsg") or "",
+            "reason": payload.get("reason") or payload.get("detail") or "",
+        }
+    return {"raw": (event.get("response_text") or "")[:240]}
+
+
+def _title_over_limit_reason(page_hints: dict[str, Any], request_summary: dict[str, Any]) -> str:
+    title_tip = str(page_hints.get("title_tip") or "").strip()
+    title_value = str(page_hints.get("title_value") or request_summary.get("title") or "").strip()
+    match = re.search(r"(\d+)\s*/\s*(\d+)", title_tip)
+    if match:
+        used = int(match.group(1))
+        limit = int(match.group(2))
+        if used > limit:
+            return f"头条标题超出平台限制：当前 {used} / {limit}，已触发保存失败。"
+    if len(title_value) > DEFAULT_TITLE_CHAR_LIMIT:
+        return f"头条标题超出平台限制：当前 {len(title_value)} / {DEFAULT_TITLE_CHAR_LIMIT}，已触发保存失败。"
+    return ""
+
+
+def _write_publish_diagnostics(config: dict[str, Any], prefix: str, diagnostics: dict[str, Any]) -> str:
+    path = _debug_json_path(config, prefix)
+    path.write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path)
+
+
+async def _build_publish_timeout_details(
+    page: Page | None,
+    *,
+    stage: str,
+    timeout_seconds: int,
+    publish_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "stage": stage,
+        "timeout_seconds": timeout_seconds,
+        "likely_reason": f"今日头条发布链路超过总超时 {timeout_seconds} 秒，已停止本次发布并保留现场诊断。",
+        "publish_events": publish_events[-5:],
+    }
+    if page is None:
+        return details
+    try:
+        details["url"] = page.url
+    except Exception:
+        pass
+    try:
+        details["page"] = await asyncio.wait_for(_collect_publish_page_hints(page), timeout=5)
+    except Exception as exc:
+        details["page_error"] = str(exc)
+    try:
+        account_diag = await asyncio.wait_for(_collect_publish_account_diagnostics(page), timeout=8)
+        details["account"] = _compact_account_diag(account_diag)
+    except Exception as exc:
+        details["account_error"] = str(exc)
+    return details
+
+
+async def _recover_published_after_error(
+    settings: Settings,
+    config: dict[str, Any],
+    page: Page | None,
+    draft: dict[str, Any],
+    draft_id: int,
+    title: str,
+    error_text: str,
+    min_create_time: int | None = None,
+    require_recent: bool = True,
+) -> dict[str, Any] | None:
+    if page is None:
+        return None
+    try:
+        verify_result = await _verify_article_published_with_retries(
+            page,
+            title,
+            config,
+            min_create_time=min_create_time,
+            require_recent=require_recent,
         )
-    elif account_finish is False or project_code not in (None, 0):
-        compact_diag["likely_reason"] = (
-            "当前头条号已实名，但收益/创作项目初始化未完成（如 account.finish=false、get proj_id nil），"
-            "平台允许进入发文页，但自动保存接口统一返回 7050。"
+    except Exception:
+        return None
+    if verify_result.get("submitted") or verify_result.get("verified"):
+        return _result_from_verified_article(
+            settings,
+            config,
+            draft,
+            draft_id,
+            title,
+            verify_result,
+            recovered_after_error=True,
+            error_text=error_text[:500],
         )
+    return None
+
+
+async def _ensure_publish_account_ready(page: Page, config: dict[str, Any], draft_id: int) -> dict[str, Any]:
+    account_diag = await _collect_publish_account_diagnostics(page)
+    issue = _account_readiness_issue(account_diag, include_soft=False)
+    if not issue:
+        return account_diag
+    diagnostics = {
+        "stage": "precheck",
+        "likely_reason": issue,
+        "account": _compact_account_diag(account_diag),
+    }
+    diagnostic_path = _write_publish_diagnostics(config, f"publish_draft_{draft_id}_precheck", diagnostics)
+    raise ToutiaoPublishError(
+        f"今日头条发布前校验未通过：{issue}",
+        diagnostics=diagnostics,
+        diagnostic_path=diagnostic_path,
+        retryable=False,
+    )
+
+
+async def _build_publish_failure_details(
+    page: Page,
+    publish_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    page_hints = await _collect_publish_page_hints(page)
+    account_diag = await _collect_publish_account_diagnostics(page)
+    last_event = publish_events[-1] if publish_events else {}
+    request_summary = last_event.get("request") or {}
+    response_summary = _response_summary_from_event(last_event)
+    compact_diag = {
+        "page": page_hints,
+        "request": request_summary,
+        "response": response_summary,
+        "likely_reason": "",
+        "account": _compact_account_diag(account_diag),
+    }
+    title_issue = _title_over_limit_reason(page_hints, request_summary)
+    account_issue = _account_readiness_issue(account_diag)
+    if title_issue:
+        compact_diag["likely_reason"] = title_issue
     elif request_summary.get("title") == "":
         compact_diag["likely_reason"] = "标题没有真正写入头条前端状态。"
     elif request_summary.get("cover_type") in (1, 2, 3) and not request_summary.get("cover_count"):
         compact_diag["likely_reason"] = "封面模式已开启，但请求里没有有效封面数据。"
-    return json.dumps(compact_diag, ensure_ascii=False)
+    elif account_issue:
+        compact_diag["likely_reason"] = account_issue
+    elif response_summary.get("code") == 7050:
+        compact_diag["likely_reason"] = (
+            "头条接口返回 7050（草稿自动保存失败），但本次没有观察到最终确认发布成功请求；"
+            "通常是发布按钮未真正触发、确认发布未完成，或平台当前状态阻断了最终提交。"
+        )
+    else:
+        response_message = str(response_summary.get("message") or response_summary.get("reason") or "").strip()
+        if response_message:
+            compact_diag["likely_reason"] = f"头条接口返回异常：{response_message}"
+    return compact_diag
 
 
-async def _publish_draft_to_toutiao_once(
+async def _publish_draft_to_toutiao_core(
     settings: Settings,
     draft_id: int,
     *,
     allow_login_retry: bool,
+    state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     config = _toutiao_config(settings)
+    state = state if state is not None else {}
+    state.setdefault("stage", "init")
+    state.setdefault("publish_events", [])
     draft = fetch_draft_by_id(settings, draft_id)
     if not draft:
         raise RuntimeError(f"稿件不存在：draft_id={draft_id}")
     if draft.get("toutiao_uploaded_at"):
-        archive_title = draft.get("title") or draft.get("canonical_title") or f"draft_id={draft_id}"
-        return {
-            "draft_id": draft_id,
-            "title": draft.get("title"),
-            "toutiao_title": _toutiao_title(archive_title, char_limit=config["title_char_limit"]),
-            "inline_image_count": 0,
-            "content_mode": "existing",
-            "content_length": len(draft.get("content_md") or ""),
-            "editor_image_count": 0,
-            "cover_count": 0,
-            "cover_uploaded": False,
-            "success_toast": "",
-            "publish_events": [],
-            "verified": bool(draft.get("toutiao_article_id")),
-            "verified_status": "existing",
-            "article_id": draft.get("toutiao_article_id"),
-            "browser_profile_dir": config["browser_profile_dir"],
-            "already_uploaded": True,
-            "uploaded_at_text": draft.get("toutiao_uploaded_at_text") or "",
-        }
+        return _existing_uploaded_payload(config, draft_id, draft)
 
     archive_path = Path(draft.get("archive_path") or "")
     if not archive_path.exists():
@@ -1318,40 +1931,87 @@ async def _publish_draft_to_toutiao_once(
     context: BrowserContext | None = None
     page: Page | None = None
     try:
+        state["stage"] = "open_browser"
         context = await _new_context(config)
         page = context.pages[0] if context.pages else await context.new_page()
+        state["page"] = page
         publish_probe = _attach_publish_probe(page)
+        state["publish_events"] = publish_probe
+
+        state["stage"] = "open_publish_page"
         await _ensure_publish_page(page, config["publish_timeout_seconds"])
         if _is_login_url(page.url):
             if allow_login_retry and config["auto_open_login_on_publish"]:
+                state["stage"] = "login"
                 login_result = await _wait_until_logged_in(context, config)
                 if not login_result.get("logged_in"):
                     raise RuntimeError(login_result.get("message") or "头条号未登录")
                 page = context.pages[0] if context.pages else page
+                state["page"] = page
+                state["stage"] = "reopen_publish_page"
                 await _ensure_publish_page(page, config["publish_timeout_seconds"])
                 await page.wait_for_timeout(2000)
             else:
                 raise RuntimeError("头条号未登录，请先初始化登录")
 
+        state["stage"] = "editor_ready"
         await _dismiss_masks(page)
+        await _wait_publish_editor_ready(page, timeout_seconds=30)
+        state["stage"] = "fill_title"
         actual_title = await _fill_title(page, title)
+        state["stage"] = "fill_content"
         content_result = await _fill_content(page, content_html, plain_text)
+        state["stage"] = "wait_auto_save"
+        await _wait_after_initial_edit(page, timeout_seconds=12)
+        state["stage"] = "account_precheck"
+        await _ensure_publish_account_ready(page, config, draft_id)
+        state["stage"] = "configure_options"
         publish_options_result = await _configure_publish_options(page, config, cover_paths)
+        state["stage"] = "click_publish"
+        state["publish_started_at"] = int(time.time()) - 10
         publish_mode = await _trigger_article_publish(page)
+        state["publish_clicked"] = True
+        state["stage"] = "wait_publish_response"
         publish_events = await _wait_for_publish_probe_events(
             page,
             publish_probe,
             timeout_seconds=min(45, config["publish_timeout_seconds"]),
         )
+        state["publish_events"] = publish_probe
+        state["stage"] = "check_success_toast"
         success_toast = await _check_success_toast(page)
-        verify_result = await _verify_article_published(page, actual_title, config["verify_list_limit"])
+        state["stage"] = "verify_article_list"
+        verify_result = await _verify_article_published_with_retries(
+            page,
+            actual_title,
+            config,
+            min_create_time=state.get("publish_started_at"),
+            require_recent=True,
+        )
         success_event = next((event for event in reversed(publish_events) if _parse_publish_response_code(event) == 0), None)
-        success = bool(success_toast or verify_result.get("verified") or success_event)
+        success = bool(success_toast or verify_result.get("submitted") or verify_result.get("verified") or success_event)
         if not success:
+            state["stage"] = "build_failure_diagnostic"
             failure_details = await _build_publish_failure_details(page, publish_events or publish_probe)
-            raise RuntimeError(f"今日头条发布失败，接口未返回成功。诊断：{failure_details}")
+            diagnostic_path = _write_publish_diagnostics(
+                config,
+                f"publish_draft_{draft_id}_diagnostic",
+                failure_details,
+            )
+            issue = str(failure_details.get("likely_reason") or "").strip() or "接口未返回成功"
+            retryable = failure_details.get("response", {}).get("code") not in {7050}
+            raise ToutiaoPublishError(
+                f"今日头条发布失败：{issue}",
+                diagnostics=failure_details,
+                diagnostic_path=diagnostic_path,
+                retryable=retryable,
+            )
         article_id = verify_result.get("article_id") or _extract_article_id_from_publish_event(success_event)
+        submission_state = verify_result.get("submission_state") or ("submitted" if success_event else "draft")
+        status_desc = verify_result.get("status_desc") or ("已提交到头条平台" if success_event else "")
+        state["stage"] = "mark_uploaded"
         mark_draft_toutiao_uploaded(settings, draft_id, article_id)
+        state["stage"] = "done"
         return {
             "draft_id": draft_id,
             "title": draft.get("title"),
@@ -1366,9 +2026,14 @@ async def _publish_draft_to_toutiao_once(
             "success_toast": success_toast,
             "publish_events": publish_events,
             "publish_mode": publish_mode,
-            "verified": bool(verify_result.get("verified")),
+            "verified": bool(verify_result.get("submitted") or verify_result.get("verified") or success_event),
             "verified_status": verify_result.get("status"),
-            "status_desc": verify_result.get("status_desc"),
+            "verify_attempt": verify_result.get("verify_attempt"),
+            "verify_attempts": verify_result.get("verify_attempts"),
+            "published": bool(verify_result.get("published")),
+            "submitted": bool(verify_result.get("submitted") or success_event),
+            "submission_state": submission_state,
+            "status_desc": status_desc,
             "article_id": article_id,
             "ad_enabled": publish_options_result["ad_enabled"],
             "claim_exclusive": publish_options_result["claim_exclusive"],
@@ -1379,14 +2044,111 @@ async def _publish_draft_to_toutiao_once(
             "already_uploaded": False,
         }
     except Exception as exc:
+        recover_title = locals().get("actual_title") or title
+        if _can_recover_after_publish(state):
+            recovered = await _recover_published_after_error(
+                settings,
+                config,
+                page,
+                draft,
+                draft_id,
+                recover_title,
+                str(exc),
+                min_create_time=state.get("publish_started_at"),
+                require_recent=True,
+            )
+            if recovered:
+                return recovered
         screenshot = await _capture_debug_screenshot(page, config, f"publish_draft_{draft_id}_error")
+        if isinstance(exc, ToutiaoPublishError):
+            raise exc.with_screenshot(screenshot)
         raise RuntimeError(f"{exc}｜截图：{screenshot}") from exc
     finally:
         await _close_context(context)
 
 
+async def _publish_draft_to_toutiao_once(
+    settings: Settings,
+    draft_id: int,
+    *,
+    allow_login_retry: bool,
+) -> dict[str, Any]:
+    config = _toutiao_config(settings)
+    state: dict[str, Any] = {"stage": "init", "publish_events": []}
+    task = asyncio.create_task(
+        _publish_draft_to_toutiao_core(
+            settings,
+            draft_id,
+            allow_login_retry=allow_login_retry,
+            state=state,
+        )
+    )
+    done, _pending = await asyncio.wait(
+        {task},
+        timeout=config["publish_total_timeout_seconds"],
+    )
+    if task in done:
+        return await task
+
+    page = state.get("page")
+    publish_events = state.get("publish_events") or []
+    diagnostics = await _build_publish_timeout_details(
+        page,
+        stage=str(state.get("stage") or "unknown"),
+        timeout_seconds=int(config["publish_total_timeout_seconds"]),
+        publish_events=publish_events,
+    )
+    draft = fetch_draft_by_id(settings, draft_id)
+    if draft and _can_recover_after_publish(state):
+        recover_title = str(diagnostics.get("page", {}).get("title_value") or "").strip()
+        if recover_title:
+            recovered = await _recover_published_after_error(
+                settings,
+                config,
+                page,
+                draft,
+                draft_id,
+                recover_title,
+                diagnostics.get("likely_reason") or "今日头条发布超时",
+                min_create_time=state.get("publish_started_at"),
+                require_recent=True,
+            )
+            if recovered:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                return recovered
+    diagnostic_path = _write_publish_diagnostics(config, f"publish_draft_{draft_id}_timeout", diagnostics)
+    screenshot = await _capture_debug_screenshot(page, config, f"publish_draft_{draft_id}_timeout")
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    raise ToutiaoPublishError(
+        diagnostics.get("likely_reason") or "今日头条发布超时",
+        diagnostics=diagnostics,
+        diagnostic_path=diagnostic_path,
+        screenshot_path=screenshot,
+        retryable=True,
+    )
+
+
 def publish_draft_to_toutiao(settings: Settings, draft_id: int) -> dict[str, Any]:
-    return asyncio.run(_publish_draft_to_toutiao_once(settings, draft_id, allow_login_retry=True))
+    config = _toutiao_config(settings)
+    draft = fetch_draft_by_id(settings, draft_id)
+    if not draft:
+        raise RuntimeError(f"稿件不存在：draft_id={draft_id}")
+    if draft.get("toutiao_uploaded_at"):
+        return _existing_uploaded_payload(config, draft_id, draft)
+    with _ToutiaoPublishFileLock(config):
+        # 拿到锁之后再查一次，避免等待期间其他入口已经发布并打标。
+        latest = fetch_draft_by_id(settings, draft_id)
+        if latest and latest.get("toutiao_uploaded_at"):
+            return _existing_uploaded_payload(config, draft_id, latest)
+        return asyncio.run(_publish_draft_to_toutiao_once(settings, draft_id, allow_login_retry=True))
 
 
 def publish_recent_drafts_to_toutiao(settings: Settings, limit: int = 10) -> dict[str, Any]:

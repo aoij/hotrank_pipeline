@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import copy
+import time
+from datetime import datetime
 from typing import Callable
 
 from .clustering import build_clusters
 from .config import Settings, load_runtime_config
+from .daily_brief import create_daily_publish_brief
 from .db import (
     cleanup_old_hotspots,
     count_recent_clusters,
     delete_old_drafts,
     find_existing_draft_for_topic,
     fetch_cluster_sources_for_generation,
+    fetch_draft_by_id,
     fetch_latest_whitelisted_items,
     fetch_recent_clusters,
+    fetch_recent_drafts,
     fetch_stats,
     fetch_unreviewed_drafts,
     fetch_unfetched_cluster_items,
@@ -34,7 +40,10 @@ from .llm import (
 from .multi_source import scrape_configured_sources
 from .notifications import send_dingtalk_progress
 from .search_sources import search_topic_sources
+from .scheduler_history import record_scheduler_history
+from .toutiao_publisher import ToutiaoPublishError, publish_draft_to_toutiao
 from .tophub import scrape_tophub_news
+from .wechat_publisher import publish_draft_to_wechat
 
 
 ProgressCallback = Callable[[str, str], None]
@@ -47,6 +56,234 @@ def _emit(progress_cb: ProgressCallback | None, level: str, message: str) -> Non
 
 def _notify(settings: Settings, title: str, lines: list[str], level: str = "info") -> None:
     send_dingtalk_progress(settings, title=title, lines=lines, level=level)
+
+
+def _notify_if(enabled: bool, settings: Settings, title: str, lines: list[str], level: str = "info") -> None:
+    if enabled:
+        _notify(settings, title, lines, level=level)
+
+
+def _automation_config(settings: Settings) -> dict:
+    runtime = load_runtime_config(settings)
+    return runtime.get("automation") or {}
+
+
+def _automation_publish_config(settings: Settings) -> dict:
+    return _automation_config(settings).get("daily_publish") or {}
+
+
+def _now_shanghai_text() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _score_to_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    try:
+        import decimal
+
+        if isinstance(value, decimal.Decimal):
+            return float(value)
+    except Exception:
+        pass
+    return value
+
+
+def _publish_channel_label(enable_wechat: bool, enable_toutiao: bool) -> str:
+    parts: list[str] = []
+    if enable_wechat:
+        parts.append("公众号")
+    if enable_toutiao:
+        parts.append("头条")
+    return " + ".join(parts) if parts else "未启用"
+
+
+def _draft_matches_preference(draft: dict, preference_keywords: list[str]) -> tuple[bool, str]:
+    if not preference_keywords:
+        return True, ""
+    title = str(draft.get("title") or draft.get("canonical_title") or "")
+    summary = str(draft.get("review_summary") or "")
+    content = f"{title}\n{summary}".lower()
+    for keyword in preference_keywords:
+        clean = (keyword or "").strip().lower()
+        if clean and clean in content:
+            return True, clean
+    return False, ""
+
+
+def _top_scored_drafts_for_publish(
+    settings: Settings,
+    limit: int,
+    *,
+    recent_scan_limit: int = 200,
+    preference_keywords: list[str] | None = None,
+    preferred_draft_ids: list[int] | None = None,
+    enable_wechat: bool = True,
+    enable_toutiao: bool = True,
+) -> list[dict]:
+    candidates = fetch_recent_drafts(settings, limit=max(limit * 8, recent_scan_limit))
+    selected: list[dict] = []
+    seen_ids: set[int] = set()
+    matched: list[dict] = []
+    fallback: list[dict] = []
+    preferred_ids = [int(item) for item in (preferred_draft_ids or []) if int(item) > 0]
+    preferred_id_set = set(preferred_ids)
+    preferred_order = {draft_id: idx for idx, draft_id in enumerate(preferred_ids)}
+    preference_keywords = preference_keywords or []
+    for row in candidates:
+        try:
+            draft_id = int(row["id"])
+        except Exception:
+            continue
+        if draft_id in seen_ids:
+            continue
+        score = row.get("review_score")
+        if score is None:
+            continue
+        if (
+            (not enable_wechat or row.get("wechat_uploaded_at"))
+            and (not enable_toutiao or row.get("toutiao_uploaded_at"))
+        ):
+            continue
+        seen_ids.add(draft_id)
+        item = dict(row)
+        ok, matched_keyword = _draft_matches_preference(item, preference_keywords)
+        item["preference_matched"] = ok
+        item["matched_keyword"] = matched_keyword
+        item["current_run_generated"] = draft_id in preferred_id_set
+        if ok:
+            matched.append(item)
+        else:
+            fallback.append(item)
+
+    def sort_key(item: dict) -> tuple:
+        draft_id = int(item.get("id") or 0)
+        score = _score_to_float(item.get("review_score"))
+        score_value = float(score) if score is not None else -1.0
+        created_at = item.get("created_at")
+        created_key = created_at.timestamp() if hasattr(created_at, "timestamp") else 0
+        return (
+            0 if draft_id in preferred_id_set else 1,
+            preferred_order.get(draft_id, 999999),
+            -score_value,
+            -created_key,
+            -draft_id,
+        )
+
+    merged = sorted(matched, key=sort_key) + sorted(fallback, key=sort_key)
+    for item in merged[:limit]:
+        selected.append(item)
+    return selected
+
+
+def _publish_selected_drafts(
+    settings: Settings,
+    drafts: list[dict],
+    *,
+    progress_cb: ProgressCallback | None = None,
+    enable_wechat: bool = True,
+    enable_toutiao: bool = True,
+    max_retries: int = 1,
+) -> dict[str, list[dict] | int]:
+    wechat_published: list[dict] = []
+    wechat_skipped: list[dict] = []
+    wechat_failed: list[dict] = []
+    toutiao_published: list[dict] = []
+    toutiao_skipped: list[dict] = []
+    toutiao_failed: list[dict] = []
+    total = len(drafts)
+
+    for idx, draft in enumerate(drafts, start=1):
+        draft_id = int(draft["id"])
+        title = draft.get("title") or draft.get("canonical_title") or f"draft_id={draft_id}"
+        score = draft.get("review_score")
+        score_text = f"{float(score):.1f}" if score is not None else "未评分"
+        _emit(progress_cb, "info", f"[发布 {idx}/{total}] 开始：draft_id={draft_id}｜评分={score_text}｜{title[:60]}")
+
+        if enable_wechat:
+            last_exc = None
+            for attempt in range(1, max(1, max_retries) + 1):
+                try:
+                    wechat_result = publish_draft_to_wechat(settings, draft_id)
+                    if wechat_result.get("already_uploaded"):
+                        wechat_skipped.append(wechat_result)
+                        _emit(progress_cb, "warning", f"[发布 {idx}/{total}] 微信已跳过重复：draft_id={draft_id}")
+                    else:
+                        wechat_published.append(wechat_result)
+                        _emit(progress_cb, "success", f"[发布 {idx}/{total}] 微信已推送：draft_id={draft_id}")
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < max(1, max_retries):
+                        _emit(progress_cb, "warning", f"[发布 {idx}/{total}] 微信推送失败，准备重试 {attempt}/{max_retries}：draft_id={draft_id}｜{exc}")
+                        continue
+            if last_exc is not None:
+                wechat_failed.append({"draft_id": draft_id, "title": title, "error": str(last_exc)})
+                _emit(progress_cb, "error", f"[发布 {idx}/{total}] 微信推送失败：draft_id={draft_id}｜{last_exc}")
+
+        if enable_toutiao:
+            last_exc = None
+            retry_attempts = max(1, max_retries)
+            for attempt in range(1, retry_attempts + 1):
+                try:
+                    toutiao_result = publish_draft_to_toutiao(settings, draft_id)
+                    if toutiao_result.get("already_uploaded"):
+                        toutiao_skipped.append(toutiao_result)
+                        _emit(progress_cb, "warning", f"[发布 {idx}/{total}] 头条已跳过重复：draft_id={draft_id}")
+                    else:
+                        toutiao_published.append(toutiao_result)
+                        _emit(progress_cb, "success", f"[发布 {idx}/{total}] 头条已发布：draft_id={draft_id}")
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if isinstance(exc, ToutiaoPublishError) and not exc.retryable:
+                        _emit(
+                            progress_cb,
+                            "error",
+                            f"[发布 {idx}/{total}] 头条发布失败且不可重试，已停止重试：draft_id={draft_id}｜{exc}",
+                        )
+                        break
+                    if attempt < retry_attempts:
+                        wait_seconds = min(30, 5 * attempt)
+                        _emit(progress_cb, "warning", f"[发布 {idx}/{total}] 头条发布失败，{wait_seconds}s 后重试 {attempt}/{retry_attempts}：draft_id={draft_id}｜{exc}")
+                        time.sleep(wait_seconds)
+                        continue
+            if last_exc is not None:
+                toutiao_failed.append({"draft_id": draft_id, "title": title, "error": str(last_exc)})
+                _emit(progress_cb, "error", f"[发布 {idx}/{total}] 头条发布失败：draft_id={draft_id}｜{last_exc}")
+
+    return {
+        "requested_count": total,
+        "wechat_enabled": enable_wechat,
+        "toutiao_enabled": enable_toutiao,
+        "wechat_published_count": len(wechat_published),
+        "wechat_skipped_count": len(wechat_skipped),
+        "wechat_failed_count": len(wechat_failed),
+        "toutiao_published_count": len(toutiao_published),
+        "toutiao_skipped_count": len(toutiao_skipped),
+        "toutiao_failed_count": len(toutiao_failed),
+        "wechat_published": wechat_published,
+        "wechat_skipped": wechat_skipped,
+        "wechat_failed": wechat_failed,
+        "toutiao_published": toutiao_published,
+        "toutiao_skipped": toutiao_skipped,
+        "toutiao_failed": toutiao_failed,
+    }
 
 
 def _existing_draft_payload(draft: dict) -> dict:
@@ -985,6 +1222,288 @@ def run_full_pipeline(settings: Settings, draft_limit: int = 1, progress_cb: Pro
         level="success",
     )
     return payload
+
+
+def run_daily_auto_publish(
+    settings: Settings,
+    *,
+    draft_limit: int | None = None,
+    publish_limit: int | None = None,
+    progress_cb: ProgressCallback | None = None,
+) -> dict:
+    config = _automation_publish_config(settings)
+    final_draft_limit = max(1, int(draft_limit or config.get("draft_limit") or 10))
+    final_publish_limit = max(1, int(publish_limit or config.get("publish_limit") or 4))
+    enable_wechat = bool(config.get("enable_wechat", True))
+    enable_toutiao = bool(config.get("enable_toutiao", True))
+    retry_count = max(1, int(config.get("retry_count") or 2))
+    notify_on_scrape = bool(config.get("notify_on_scrape", True))
+    notify_on_draft_generated = bool(config.get("notify_on_draft_generated", True))
+    notify_on_publish_finished = bool(config.get("notify_on_publish_finished", True))
+    preference_keywords = [
+        str(item).strip()
+        for item in (config.get("preference_keywords") or [])
+        if str(item).strip()
+    ]
+
+    _emit(progress_cb, "info", f"自动任务开始：{_now_shanghai_text()}｜抓取并生成 {final_draft_limit} 篇，择优发布 {final_publish_limit} 篇")
+    _notify_if(
+        notify_on_scrape,
+        settings,
+        "自动任务开始：抓取今日热点",
+        [
+            f"执行时间：{_now_shanghai_text()}",
+            f"目标初稿：{final_draft_limit} 篇",
+            f"计划发布：{final_publish_limit} 篇",
+            f"发布渠道：{_publish_channel_label(enable_wechat, enable_toutiao)}",
+        ],
+        level="info",
+    )
+
+    pipeline_result = run_full_pipeline(settings, draft_limit=final_draft_limit, progress_cb=progress_cb)
+    scrape_result = pipeline_result["scrape"]
+    draft_result = pipeline_result["draft"]
+    current_run_draft_ids = [
+        int(item["draft_id"])
+        for item in (draft_result.get("drafts") or [])
+        if item.get("draft_id")
+    ]
+
+    _notify_if(
+        notify_on_scrape,
+        settings,
+        "自动任务进度：抓取已完成",
+        [
+            f"抓取热点：{scrape_result['item_count']} 条",
+            f"聚类：{pipeline_result['cluster']['cluster_count']} 组",
+            f"正文补抓成功：{pipeline_result['enrich']['fetched']} 条",
+        ],
+        level="success",
+    )
+    _notify_if(
+        notify_on_draft_generated,
+        settings,
+        "自动任务进度：初稿已生成",
+        [
+            f"成功：{draft_result['generated_count']} 篇",
+            f"重复跳过：{draft_result.get('skipped_existing_count', 0)} 篇",
+            f"失败：{draft_result.get('failed_count', 0)} 篇",
+        ],
+        level="success" if not draft_result.get("failed_count") else "warning",
+    )
+
+    selected = _top_scored_drafts_for_publish(
+        settings,
+        final_publish_limit,
+        preference_keywords=preference_keywords,
+        preferred_draft_ids=current_run_draft_ids,
+        enable_wechat=enable_wechat,
+        enable_toutiao=enable_toutiao,
+    )
+    _emit(
+        progress_cb,
+        "info",
+        (
+            f"自动任务选稿完成：准备发布 {len(selected)} 篇"
+            f"｜本轮新稿优先={len(current_run_draft_ids)} 篇"
+        ),
+    )
+    run_at_text = _now_shanghai_text()
+    if not selected:
+        brief = create_daily_publish_brief(
+            run_at=run_at_text,
+            status="warning",
+            schedule_time=config.get("schedule_time") or "07:00",
+            draft_limit=final_draft_limit,
+            publish_limit=final_publish_limit,
+            retry_count=retry_count,
+            enable_wechat=enable_wechat,
+            enable_toutiao=enable_toutiao,
+            preference_keywords=preference_keywords,
+            pipeline_result=pipeline_result,
+            selected_drafts=[],
+            publish_result={
+                "requested_count": 0,
+                "wechat_published_count": 0,
+                "wechat_skipped_count": 0,
+                "wechat_failed_count": 0,
+                "toutiao_published_count": 0,
+                "toutiao_skipped_count": 0,
+                "toutiao_failed_count": 0,
+                "wechat_published": [],
+                "wechat_skipped": [],
+                "wechat_failed": [],
+                "toutiao_published": [],
+                "toutiao_skipped": [],
+                "toutiao_failed": [],
+            },
+            message="自动任务结束：没有可发布稿件",
+        )
+        record_scheduler_history(
+            {
+                "run_at": run_at_text,
+                "status": "warning",
+                "message": "自动任务结束：没有可发布稿件",
+                "schedule_time": config.get("schedule_time") or "07:00",
+                "draft_limit": final_draft_limit,
+                "publish_limit": final_publish_limit,
+                "retry_count": retry_count,
+                "enable_wechat": enable_wechat,
+                "enable_toutiao": enable_toutiao,
+                "selected_count": 0,
+                "selected_titles": [],
+                "brief_title": brief.get("title"),
+                "brief_path": brief.get("brief_path"),
+            }
+        )
+        _notify_if(
+            notify_on_publish_finished,
+            settings,
+            "自动任务结束：没有可发布稿件",
+            [
+                "本次没有找到已评分的可发布稿件。",
+                f"初稿生成成功：{draft_result['generated_count']} 篇",
+                f"今日简报：{brief.get('brief_path')}",
+            ],
+            level="warning",
+        )
+        return {
+            "pipeline": _json_safe(copy.deepcopy(pipeline_result)),
+            "selected_count": 0,
+            "selected_drafts": [],
+            "brief": _json_safe(brief),
+            "publish": {
+                "requested_count": 0,
+                "wechat_published_count": 0,
+                "wechat_skipped_count": 0,
+                "wechat_failed_count": 0,
+                "toutiao_published_count": 0,
+                "toutiao_skipped_count": 0,
+                "toutiao_failed_count": 0,
+                "wechat_published": [],
+                "wechat_skipped": [],
+                "wechat_failed": [],
+                "toutiao_published": [],
+                "toutiao_skipped": [],
+                "toutiao_failed": [],
+            },
+        }
+
+    publish_result = _publish_selected_drafts(
+        settings,
+        selected,
+        progress_cb=progress_cb,
+        enable_wechat=enable_wechat,
+        enable_toutiao=enable_toutiao,
+        max_retries=retry_count,
+    )
+    selected_payload = []
+    for row in selected:
+        draft_id = int(row["id"])
+        current = fetch_draft_by_id(settings, draft_id) or row
+        review_score = _score_to_float(current.get("review_score"))
+        selected_payload.append(
+            {
+                "draft_id": draft_id,
+                "title": current.get("title") or current.get("canonical_title") or f"draft_id={draft_id}",
+                "review_score": review_score,
+                "created_at_text": current.get("created_at_text") or row.get("created_at_text") or "",
+                "preference_matched": bool(row.get("preference_matched")),
+                "matched_keyword": row.get("matched_keyword") or "",
+            }
+        )
+
+    summary_level = (
+        "success"
+        if not publish_result["wechat_failed_count"] and not publish_result["toutiao_failed_count"]
+        else "warning"
+    )
+    selected_titles = "；".join(
+        (
+            f"{item['title'][:22]}（{_score_to_float(item['review_score']):.1f}分"
+            + (f"，偏好={item['matched_keyword']}" if item.get("matched_keyword") else "")
+            + "）"
+        )
+        if item.get("review_score") is not None
+        else f"{item['title'][:22]}（未评分）"
+        for item in selected_payload
+    )
+    _notify_if(
+        notify_on_publish_finished,
+        settings,
+        "自动任务完成：已推送到头条和公众号",
+        [
+            f"执行时间：{run_at_text}",
+            f"已选高分稿件：{len(selected_payload)} 篇",
+            f"公众号：{'已关闭' if not enable_wechat else f'成功 {publish_result['wechat_published_count']} / 跳过 {publish_result['wechat_skipped_count']} / 失败 {publish_result['wechat_failed_count']}'}",
+            f"今日头条：{'已关闭' if not enable_toutiao else f'成功 {publish_result['toutiao_published_count']} / 跳过 {publish_result['toutiao_skipped_count']} / 失败 {publish_result['toutiao_failed_count']}'}",
+            "入选稿件：" + (selected_titles or "无"),
+        ],
+        level=summary_level,
+    )
+    brief = create_daily_publish_brief(
+        run_at=run_at_text,
+        status=summary_level,
+        schedule_time=config.get("schedule_time") or "07:00",
+        draft_limit=final_draft_limit,
+        publish_limit=final_publish_limit,
+        retry_count=retry_count,
+        enable_wechat=enable_wechat,
+        enable_toutiao=enable_toutiao,
+        preference_keywords=preference_keywords,
+        pipeline_result=pipeline_result,
+        selected_drafts=selected_payload,
+        publish_result=publish_result,
+        message=(
+            f"自动任务完成：已选 {len(selected_payload)} 篇｜"
+            f"公众号成功 {publish_result['wechat_published_count']}｜"
+            f"头条成功 {publish_result['toutiao_published_count']}"
+        ),
+    )
+    _notify_if(
+        notify_on_publish_finished,
+        settings,
+        "自动任务简报已生成",
+        [
+            f"简报标题：{brief.get('title')}",
+            f"简报路径：{brief.get('brief_path')}",
+            f"入选稿件：{len(selected_payload)} 篇",
+        ],
+        level=summary_level,
+    )
+    record_scheduler_history(
+        {
+            "run_at": run_at_text,
+            "status": summary_level,
+            "message": (
+                f"自动任务完成：已选 {len(selected_payload)} 篇｜"
+                f"公众号成功 {publish_result['wechat_published_count']}｜"
+                f"头条成功 {publish_result['toutiao_published_count']}"
+            ),
+            "schedule_time": config.get("schedule_time") or "07:00",
+            "draft_limit": final_draft_limit,
+            "publish_limit": final_publish_limit,
+            "retry_count": retry_count,
+            "enable_wechat": enable_wechat,
+            "enable_toutiao": enable_toutiao,
+            "selected_count": len(selected_payload),
+            "wechat_published_count": publish_result["wechat_published_count"],
+            "wechat_failed_count": publish_result["wechat_failed_count"],
+            "toutiao_published_count": publish_result["toutiao_published_count"],
+            "toutiao_failed_count": publish_result["toutiao_failed_count"],
+            "selected_titles": [item.get("title") for item in selected_payload],
+            "brief_title": brief.get("title"),
+            "brief_path": brief.get("brief_path"),
+        }
+    )
+
+    return {
+        "pipeline": _json_safe(copy.deepcopy(pipeline_result)),
+        "selected_count": len(selected_payload),
+        "selected_drafts": _json_safe(selected_payload),
+        "brief": _json_safe(brief),
+        "publish": _json_safe(copy.deepcopy(publish_result)),
+    }
 
 
 def _group_clusters_by_date(clusters: list[dict]) -> list[dict]:

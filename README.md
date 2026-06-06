@@ -256,3 +256,39 @@ order by s.fetched_at desc, i.rank_num asc;
 1. 更强的原文抓取适配器
 2. 发布前人工审核页
 3. 已发文记录与复盘统计
+
+## 每日自动发布兜底（Windows 计划任务）
+
+Web 页面会启动进程内调度器，但如果本机/服务在 07:00 没有运行，就无法准点触发。为避免这种情况，项目提供 Windows 计划任务兜底脚本。
+
+安装或更新每天 07:00 自动任务：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_daily_auto_publish_task.ps1 -At 07:00
+```
+
+计划任务实际调用：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_auto_publish.ps1
+```
+
+脚本会执行：
+
+```powershell
+python -X utf8 -m hotrank_pipeline.main run-daily-auto-publish --trigger windows-task
+```
+
+稳定性规则：
+
+- Web 调度器、手动按钮、CLI、Windows 计划任务共用跨进程锁：`data/scheduler/daily_publish.lock`。
+- 同一天已有成功记录时，默认跳过，避免重复发布。
+- 如需人工验证，可加 `--force` 强制执行一次。
+- Windows 任务启用 `StartWhenAvailable`，本机 07:00 不可用时，恢复可用后会补跑一次。
+- 运行日志写入 `data/scheduler/windows_task_yyyyMMdd.log`。
+
+卸载计划任务：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall_daily_auto_publish_task.ps1
+```

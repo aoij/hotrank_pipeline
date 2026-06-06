@@ -15,6 +15,7 @@ from .services import (
     run_review_drafts,
     run_scrape,
 )
+from .scheduler import run_daily_publish_once
 from .toutiao_publisher import login_toutiao, publish_recent_drafts_to_toutiao
 from .wechat_publisher import publish_recent_drafts_to_wechat
 
@@ -44,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     toutiao_login_parser.add_argument("--pretty", action="store_true", help="输出缩进 JSON")
     toutiao_publish_parser = subparsers.add_parser("publish-toutiao-drafts", help="把高分初稿直接发布到今日头条")
     toutiao_publish_parser.add_argument("--limit", type=int, default=10, help="最多发布多少篇")
+    auto_publish_parser = subparsers.add_parser("run-daily-auto-publish", help="执行每日自动抓取、成稿、评分与双端发布")
+    auto_publish_parser.add_argument("--draft-limit", type=int, default=None, help="先生成多少篇初稿；默认读取页面配置")
+    auto_publish_parser.add_argument("--publish-limit", type=int, default=None, help="最终择优发布多少篇；默认读取页面配置")
+    auto_publish_parser.add_argument("--force", action="store_true", help="忽略今日已成功记录，强制执行一次")
+    auto_publish_parser.add_argument("--trigger", default="cli", help="触发来源标记，例如 cli / windows-task / manual")
     pipeline_parser = subparsers.add_parser("run-pipeline", help="执行 scrape -> cluster -> enrich -> generate")
     pipeline_parser.add_argument("--draft-limit", type=int, default=1, help="完整流程最后生成多少篇")
     web_parser = subparsers.add_parser("run-web", help="启动 Web 页面")
@@ -112,6 +118,17 @@ def main() -> int:
         print(json.dumps(publish_recent_drafts_to_toutiao(settings, limit=args.limit), ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "run-daily-auto-publish":
+        result = run_daily_publish_once(
+            settings,
+            trigger=args.trigger,
+            force=args.force,
+            draft_limit=args.draft_limit,
+            publish_limit=args.publish_limit,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return 0 if result.get("status") != "error" else 1
+
     if args.command == "run-pipeline":
         print(json.dumps(run_full_pipeline(settings, draft_limit=args.draft_limit), ensure_ascii=False, indent=2))
         return 0
@@ -128,3 +145,7 @@ def main() -> int:
 
     parser.print_help()
     return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

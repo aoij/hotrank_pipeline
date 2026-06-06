@@ -1454,6 +1454,49 @@
               </div>
               {% endif %}
             </div>
+
+            <div class="action-card action-card-feature" style="margin-top: 14px;">
+              <div class="step-row">
+                <span class="step-num">定</span>
+                <h3>每日自动抓取与发布</h3>
+              </div>
+              <p>每天 {{ scheduler_state.time }} 自动抓热点、生成 {{ scheduler_state.draft_limit }} 篇初稿、挑选 {{ scheduler_state.publish_limit }} 篇高分稿同步推送到公众号和今日头条；抓取开始、初稿生成完成、最终推送完成都会发钉钉。</p>
+              <div class="form-tip" style="margin: 10px 0 12px 0;">
+                调度：{{ '已启用' if scheduler_state.enabled else '未启用' }}｜线程：{{ '运行中' if scheduler_state.running else '待命' }}｜重试：{{ scheduler_state.retry_count }} 次<br>
+                渠道：{{ '公众号' if scheduler_state.enable_wechat else '' }}{% if scheduler_state.enable_wechat and scheduler_state.enable_toutiao %} + {% endif %}{{ '头条' if scheduler_state.enable_toutiao else '' }}{% if not scheduler_state.enable_wechat and not scheduler_state.enable_toutiao %}未启用{% endif %}<br>
+                偏好关键词：{{ scheduler_state.preference_keywords | join(' / ') if scheduler_state.preference_keywords else '未设置' }}<br>
+                最近一次：{{ scheduler_state.last_run_at or '暂无' }}{% if scheduler_state.last_status %}｜{{ scheduler_state.last_status }}{% endif %}{% if scheduler_state.last_message %}<br>{{ scheduler_state.last_message }}{% endif %}
+              </div>
+              {% if latest_scheduler_brief and latest_scheduler_brief.brief_path %}
+              <div class="form-tip" style="margin: 0 0 12px 0;">
+                最新简报：{{ latest_scheduler_brief.brief_title or '今日发布简报' }}<br>
+                <a href="/editor?path={{ latest_scheduler_brief.brief_path | urlencode }}" target="_blank">点击直接渲染查看</a>
+                <span style="color:#94a3b8;">｜{{ latest_scheduler_brief.brief_path }}</span>
+              </div>
+              {% endif %}
+              <form class="action-foot" method="post" action="/actions/auto-daily-publish-run-now">
+                <button type="submit" class="secondary full-button">立即手动跑一次自动任务</button>
+              </form>
+              {% if scheduler_history %}
+              <div style="margin-top: 12px; display: grid; gap: 8px;">
+                {% for item in scheduler_history %}
+                <div class="draft-card-mini" style="text-decoration:none;">
+                  <div class="draft-topline">
+                    <div class="draft-title">自动任务｜{{ item.run_at }}</div>
+                    <span class="score-pill {% if item.status == 'success' %}article-score{% else %}unscored{% endif %}">{{ item.status }}</span>
+                  </div>
+                  <div class="draft-meta">draft={{ item.draft_limit or '-' }}｜publish={{ item.publish_limit or '-' }}｜wechat={{ item.wechat_published_count if item.wechat_published_count is defined else '-' }}｜toutiao={{ item.toutiao_published_count if item.toutiao_published_count is defined else '-' }}</div>
+                  <div class="draft-summary">{{ item.message }}</div>
+                  {% if item.brief_path %}
+                  <div class="draft-meta" style="margin-top:6px;">
+                    <a href="/editor?path={{ item.brief_path | urlencode }}" target="_blank">查看简报</a>
+                  </div>
+                  {% endif %}
+                </div>
+                {% endfor %}
+              </div>
+              {% endif %}
+            </div>
           </div>
         </div>
 
@@ -1794,6 +1837,55 @@
               <label>钉钉超时（秒）</label>
               <input type="number" min="3" max="30" name="dingtalk_timeout_seconds" value="{{ runtime.notifications.dingtalk.timeout_seconds if runtime.notifications is defined and runtime.notifications.dingtalk is defined and runtime.notifications.dingtalk.timeout_seconds else 10 }}">
               <div class="form-tip">保存后、跑流程后、重新生成后都会自动发一条进度通知；Webhook / Secret 留空则保留当前值。</div>
+
+              <hr class="section-divider">
+              <h3 class="subsection-title">每日自动任务</h3>
+
+              <label>
+                <input type="checkbox" name="auto_daily_publish_enabled" {% if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.enabled %}checked{% endif %} style="width:auto; margin-right:8px;">
+                开启每日自动抓取 / 成稿 / 发布
+              </label>
+
+              <label>每天执行时间</label>
+              <input name="auto_daily_publish_time" value="{{ runtime.automation.daily_publish.schedule_time if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.schedule_time else '07:00' }}" placeholder="07:00">
+
+              <label>自动生成初稿数量</label>
+              <input type="number" min="1" max="30" name="auto_daily_publish_draft_limit" value="{{ runtime.automation.daily_publish.draft_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.draft_limit else 10 }}">
+
+              <label>自动择优发布数量</label>
+              <input type="number" min="1" max="10" name="auto_daily_publish_publish_limit" value="{{ runtime.automation.daily_publish.publish_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.publish_limit else 4 }}">
+
+              <label>发布失败重试次数</label>
+              <input type="number" min="1" max="5" name="auto_daily_publish_retry_count" value="{{ runtime.automation.daily_publish.retry_count if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.retry_count else 2 }}">
+
+              <label>
+                <input type="checkbox" name="auto_daily_publish_enable_wechat" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.enable_wechat is not defined or runtime.automation.daily_publish.enable_wechat %}checked{% endif %} style="width:auto; margin-right:8px;">
+                自动推送到微信公众号
+              </label>
+
+              <label>
+                <input type="checkbox" name="auto_daily_publish_enable_toutiao" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.enable_toutiao is not defined or runtime.automation.daily_publish.enable_toutiao %}checked{% endif %} style="width:auto; margin-right:8px;">
+                自动发布到今日头条
+              </label>
+
+              <label>用户偏好关键词</label>
+              <input name="auto_daily_publish_preference_keywords" value="{{ (runtime.automation.daily_publish.preference_keywords | join('，')) if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.preference_keywords else '' }}" placeholder="例如：AI，科技，安全，普通人，生活">
+
+              <label>
+                <input type="checkbox" name="auto_daily_publish_notify_on_scrape" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.notify_on_scrape is not defined or runtime.automation.daily_publish.notify_on_scrape %}checked{% endif %} style="width:auto; margin-right:8px;">
+                抓取开始时发钉钉
+              </label>
+
+              <label>
+                <input type="checkbox" name="auto_daily_publish_notify_on_draft_generated" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.notify_on_draft_generated is not defined or runtime.automation.daily_publish.notify_on_draft_generated %}checked{% endif %} style="width:auto; margin-right:8px;">
+                初稿生成完成时发钉钉
+              </label>
+
+              <label>
+                <input type="checkbox" name="auto_daily_publish_notify_on_publish_finished" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.notify_on_publish_finished is not defined or runtime.automation.daily_publish.notify_on_publish_finished %}checked{% endif %} style="width:auto; margin-right:8px;">
+                最终发布完成时发钉钉
+              </label>
+              <div class="form-tip">默认每天早上 7 点：先抓热点，再生成 10 篇初稿，按评分高且时间新的顺序挑 4 篇。你现在可以再限定偏好关键词、控制只发公众号/只发头条，并为失败发布开启自动重试。</div>
 
               <div style="margin-top: 16px;">
                 <button type="submit" class="full-button">保存当前配置</button>
