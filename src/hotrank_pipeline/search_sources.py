@@ -790,9 +790,25 @@ def refine_topic_sources_with_llm(
         "temperature": 0.25,
         "max_tokens": 900,
     }
+    effort = llm_config.get("reasoning_effort") or llm_config.get("reasoning_level") or llm_config.get("reasoning")
+    if isinstance(effort, str) and effort.strip():
+        payload["reasoning_effort"] = {"超高": "xhigh", "最高": "xhigh", "高": "high", "中": "medium", "低": "low"}.get(
+            effort.strip(),
+            effort.strip(),
+        )
+    session = requests.Session()
+    if bool(llm_config.get("disable_env_proxy", True)):
+        session.trust_env = False
     try:
-        response = requests.post(
-            f"{llm_config['base_url'].rstrip('/')}/chat/completions",
+        base_url = str(llm_config["base_url"]).rstrip("/")
+        if base_url.endswith("/chat/completions"):
+            endpoint = base_url
+        elif base_url.endswith("/v1"):
+            endpoint = f"{base_url}/chat/completions"
+        else:
+            endpoint = f"{base_url}/v1/chat/completions"
+        response = session.post(
+            endpoint,
             headers={
                 "Authorization": f"Bearer {llm_config['api_key']}",
                 "Content-Type": "application/json",
@@ -807,6 +823,8 @@ def refine_topic_sources_with_llm(
         if progress_cb:
             progress_cb("warning", f"模型筛选资料失败，已使用搜索排序：{exc}")
         return sources[:max_results], ""
+    finally:
+        session.close()
 
     selected_indices: list[int] = []
     raw_indices = data.get("selected_indices") or data.get("indices") or data.get("selected") or []

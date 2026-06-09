@@ -312,6 +312,32 @@ def _draft_topic_keys(draft: dict) -> set[str]:
     return keys
 
 
+WEAK_TITLE_PATTERNS = (
+    r"你可能也刷到了",
+    r"今天朋友圈刷屏",
+    r"和很多人想的可能不太一样",
+    r"别被.+带跑",
+    r"别让.+替你",
+    r"别把.+读过头",
+    r"别只当.+看",
+    r"看热闹可以",
+    r"热闹可以看",
+    r"真正值得看的不是热闹",
+    r"重点不只是",
+    r"这事和你有关吗",
+)
+
+
+def _draft_has_weak_distribution_title(draft: dict) -> bool:
+    title = str(draft.get("title") or draft.get("canonical_title") or "").strip()
+    if not title:
+        return True
+    compact = re.sub(r"\s+", "", title)
+    if len(compact) > 30:
+        return True
+    return any(re.search(pattern, compact) for pattern in WEAK_TITLE_PATTERNS)
+
+
 def _top_scored_drafts_for_publish(
     settings: Settings,
     limit: int,
@@ -322,6 +348,7 @@ def _top_scored_drafts_for_publish(
     preferred_only: bool = False,
     enable_wechat: bool = True,
     enable_toutiao: bool = True,
+    min_review_score: float = 8.6,
 ) -> list[dict]:
     candidates = fetch_recent_drafts(settings, limit=max(limit * 8, recent_scan_limit))
     selected: list[dict] = []
@@ -342,6 +369,11 @@ def _top_scored_drafts_for_publish(
             continue
         score = row.get("review_score")
         if score is None:
+            continue
+        score_value = _score_to_float(score)
+        if score_value is None or score_value < float(min_review_score):
+            continue
+        if _draft_has_weak_distribution_title(row):
             continue
         # 自动发布阶段按“热点首发”处理：任一渠道已经发过的稿件，不再进入自动发布池。
         # 这样可避免同一篇稿件先发微信后再发头条，或反过来二次发送。
@@ -1572,6 +1604,7 @@ def run_daily_auto_publish(
         int(hotspot_limit or config.get("hotspot_limit") or 30),
     )
     final_publish_limit = max(1, int(publish_limit or config.get("publish_limit") or 3))
+    min_publish_score = max(0.0, min(float(config.get("min_publish_score") or 8.6), 10.0))
     enable_wechat = bool(config.get("enable_wechat", True))
     enable_toutiao = bool(config.get("enable_toutiao", True))
     retry_count = max(1, int(config.get("retry_count") or 2))
@@ -1587,7 +1620,7 @@ def run_daily_auto_publish(
     _emit(
         progress_cb,
         "info",
-        f"自动任务开始：{_now_shanghai_text()}｜热点候选 {final_hotspot_limit} 个｜生成 {final_draft_limit} 篇｜择优发布 {final_publish_limit} 篇",
+        f"自动任务开始：{_now_shanghai_text()}｜热点候选 {final_hotspot_limit} 个｜生成 {final_draft_limit} 篇｜择优发布 {final_publish_limit} 篇｜发布分数线 {min_publish_score:.1f}",
     )
     _notify_if(
         notify_on_scrape,
@@ -1599,6 +1632,7 @@ def run_daily_auto_publish(
             f"热点候选：{final_hotspot_limit} 个",
             f"目标初稿：{final_draft_limit} 篇",
             f"计划发布：{final_publish_limit} 篇",
+            f"发布分数线：{min_publish_score:.1f}",
             f"发布渠道：{_publish_channel_label(enable_wechat, enable_toutiao)}",
         ],
         level="info",
@@ -1652,6 +1686,7 @@ def run_daily_auto_publish(
         preferred_only=True,
         enable_wechat=enable_wechat,
         enable_toutiao=enable_toutiao,
+        min_review_score=min_publish_score,
     )
     toutiao_selected: list[dict] = []
     wechat_selected: list[dict] = []
@@ -1681,7 +1716,7 @@ def run_daily_auto_publish(
         (
             f"自动任务选稿完成：本轮新稿 {len(current_run_draft_ids)} 篇｜"
             f"头条 {len(toutiao_selected)} 篇｜微信 {len(wechat_selected)} 篇｜"
-            "同一篇不会同时发两个渠道"
+            f"分数线 {min_publish_score:.1f}｜同一篇不会同时发两个渠道"
         ),
     )
     run_at_text = _now_shanghai_text()
@@ -1690,6 +1725,8 @@ def run_daily_auto_publish(
         end_message = "自动任务结束：没有可发布稿件"
         if draft_result.get("generated_count", 0) <= 0 and draft_result.get("failed_count", 0) > 0 and failure_reason:
             end_message = f"自动任务结束：初稿未生成成功（{failure_reason}）"
+        elif draft_result.get("generated_count", 0) > 0:
+            end_message = f"自动任务结束：本轮稿件未达到自动发布分数线 {min_publish_score:.1f}"
         brief = create_daily_publish_brief(
             run_at=run_at_text,
             status="warning",
@@ -1747,10 +1784,11 @@ def run_daily_auto_publish(
                 (
                     f"本次没有可发布稿件，主要原因：{failure_reason}"
                     if failure_reason and draft_result.get("generated_count", 0) <= 0
-                    else "本次没有找到已评分的可发布稿件。"
+                    else f"本次生成了稿件，但没有达到自动发布分数线 {min_publish_score:.1f}，已保留在编辑器里。"
                 ),
                 f"初稿生成成功：{draft_result['generated_count']} 篇",
                 f"初稿生成失败：{draft_result.get('failed_count', 0)} 篇",
+                f"发布分数线：{min_publish_score:.1f}",
                 f"今日简报：{brief.get('brief_path')}",
             ],
             level="warning",

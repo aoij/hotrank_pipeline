@@ -260,8 +260,8 @@
     .stats-grid {
       display: grid;
       grid-template-columns: repeat(6, minmax(0, 1fr));
-      gap: 12px;
-      margin-top: 18px;
+      gap: 8px;
+      margin-top: 14px;
     }
 
     .stat-card {
@@ -269,9 +269,9 @@
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius-lg);
-      padding: 16px 16px 14px;
+      padding: 12px 12px 10px;
       box-shadow: var(--shadow-sm);
-      transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+      transition: border-color 0.15s ease;
       overflow: hidden;
     }
 
@@ -281,14 +281,12 @@
       top: 0;
       left: 0;
       right: 0;
-      height: 3px;
-      background: var(--bar-color, var(--primary));
-      opacity: 0.85;
+      height: 2px;
+      background: var(--border-strong);
+      opacity: 0.9;
     }
 
     .stat-card:hover {
-      transform: translateY(-1px);
-      box-shadow: var(--shadow-md);
       border-color: var(--border-strong);
     }
 
@@ -299,18 +297,18 @@
     }
 
     .stat-card .stat-icon {
-      width: 30px;
-      height: 30px;
-      border-radius: 9px;
+      width: 24px;
+      height: 24px;
+      border-radius: 8px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      background: var(--bar-soft, var(--primary-soft));
-      color: var(--bar-color, var(--primary));
+      background: var(--surface-muted);
+      color: var(--text-mute);
       flex-shrink: 0;
     }
 
-    .stat-card .stat-icon svg { width: 16px; height: 16px; }
+    .stat-card .stat-icon svg { width: 14px; height: 14px; }
 
     .stat-card .stat-label {
       font-size: 12.5px;
@@ -319,8 +317,8 @@
     }
 
     .stat-card .stat-value {
-      margin-top: 8px;
-      font-size: 26px;
+      margin-top: 6px;
+      font-size: 22px;
       font-weight: 700;
       color: var(--text-main);
       line-height: 1.05;
@@ -329,18 +327,18 @@
     }
 
     .stat-card .stat-foot {
-      margin-top: 6px;
-      font-size: 11.5px;
+      margin-top: 4px;
+      font-size: 11px;
       color: var(--text-mute);
       font-family: "SF Mono", Consolas, "Microsoft YaHei Mono", monospace;
     }
 
-    .stat-card.tone-primary { --bar-color: var(--primary); --bar-soft: var(--primary-soft); }
-    .stat-card.tone-accent  { --bar-color: var(--accent);  --bar-soft: var(--accent-soft); }
-    .stat-card.tone-success { --bar-color: var(--success); --bar-soft: var(--success-soft); }
-    .stat-card.tone-warning { --bar-color: var(--warning); --bar-soft: var(--warning-soft); }
-    .stat-card.tone-violet  { --bar-color: var(--violet);  --bar-soft: var(--violet-soft); }
-    .stat-card.tone-rose    { --bar-color: #e11d48;        --bar-soft: #ffe4e6; }
+    .stat-card.tone-primary,
+    .stat-card.tone-accent,
+    .stat-card.tone-success,
+    .stat-card.tone-warning,
+    .stat-card.tone-violet,
+    .stat-card.tone-rose { --bar-color: var(--border-strong); --bar-soft: var(--surface-muted); }
 
     .workspace {
       display: grid;
@@ -539,6 +537,67 @@
       line-height: 1.65;
     }
 
+    .quick-command-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr) minmax(180px, 0.55fr);
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .quick-command {
+      border: 1px solid #1e293b;
+      border-radius: var(--radius-lg);
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      color: #e2e8f0;
+      padding: 16px;
+      box-shadow: var(--shadow-sm);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 152px;
+    }
+
+    .quick-command.light {
+      background: var(--surface-soft);
+      color: var(--text-main);
+      border-color: var(--border);
+    }
+
+    .quick-command h3 {
+      margin: 0;
+      font-size: 16px;
+      color: inherit;
+    }
+
+    .quick-command p {
+      margin: 0;
+      color: #cbd5e1;
+      font-size: 13px;
+      line-height: 1.6;
+      min-height: 42px;
+    }
+
+    .quick-command.light p { color: var(--text-sub); }
+    .quick-command .action-foot { margin-top: auto; }
+
+    .action-section-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 18px 0 10px;
+      color: var(--text-main);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+    }
+
+    .action-section-title::after {
+      content: "";
+      height: 1px;
+      flex: 1;
+      background: var(--border);
+    }
+
     .button-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -617,6 +676,9 @@
     .action-card.action-card-feature p { color: #cbd5e1; min-height: auto; }
     .action-card.action-card-feature .step-num { background: rgba(255,255,255,0.1); color: #fff; }
     .action-card.action-card-feature input[type="number"] { background: rgba(255,255,255,0.96); }
+    .action-card.secondary-duplicate { display: none; }
+    .action-card.editor-entry { background: var(--surface-soft); }
+    .action-card.editor-entry .draft-summary { display: none; }
 
     .inline-form {
       display: flex;
@@ -1629,6 +1691,16 @@
               <label>LLM 模型</label>
               <input name="llm_model" value="{{ runtime.llm.model }}">
 
+              <label>推理强度</label>
+              <input name="llm_reasoning_effort" value="{{ runtime.llm.reasoning_effort if runtime.llm.reasoning_effort is defined else 'xhigh' }}" placeholder="例如：xhigh / high / medium / low">
+              <div class="form-tip">OpenAI 兼容网关支持时会传给 <code>reasoning_effort</code>；不支持的模型会按网关兼容策略处理。</div>
+
+              <label>
+                <input type="checkbox" name="llm_disable_env_proxy" {% if runtime.llm.disable_env_proxy is not defined or runtime.llm.disable_env_proxy %}checked{% endif %} style="width:auto; margin-right:8px;">
+                成稿模型请求不走系统代理
+              </label>
+              <div class="form-tip">开启后，生成初稿、AI 自检改稿、文章评分都会忽略 Windows 全局 HTTP(S)_PROXY，避免小米 Mimo 等国内模型出现 SSL EOF。</div>
+
               <label>LLM API Key（留空则保持当前值）</label>
               <input name="llm_api_key" placeholder="当前：{{ masked_api_key }}">
 
@@ -1857,6 +1929,10 @@
 
               <label>自动择优发布数量</label>
               <input type="number" min="1" max="10" name="auto_daily_publish_publish_limit" value="{{ runtime.automation.daily_publish.publish_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.publish_limit else 3 }}">
+
+              <label>自动发布最低文章分</label>
+              <input type="number" min="0" max="10" step="0.1" name="auto_daily_publish_min_publish_score" value="{{ runtime.automation.daily_publish.min_publish_score if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.min_publish_score is defined else 8.6 }}">
+              <div class="form-tip">低于这个分数、标题超过 30 字或命中模板标题的稿件，只保留在编辑器里，不自动发布。</div>
 
               <label>发布失败重试次数</label>
               <input type="number" min="1" max="5" name="auto_daily_publish_retry_count" value="{{ runtime.automation.daily_publish.retry_count if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.retry_count else 2 }}">

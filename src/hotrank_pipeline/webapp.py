@@ -326,6 +326,8 @@ def update_config(
     llm_base_url: str = Form(...),
     llm_model: str = Form(...),
     llm_api_key: str = Form(""),
+    llm_reasoning_effort: str = Form(""),
+    llm_disable_env_proxy: str = Form(""),
     llm_draft_prompt: str = Form(""),
     image_generation_base_url: str = Form(""),
     image_generation_model: str = Form(""),
@@ -365,6 +367,7 @@ def update_config(
     auto_daily_publish_hotspot_limit: int = Form(30),
     auto_daily_publish_draft_limit: int = Form(5),
     auto_daily_publish_publish_limit: int = Form(3),
+    auto_daily_publish_min_publish_score: float = Form(8.6),
     auto_daily_publish_retry_count: int = Form(2),
     auto_daily_publish_enable_wechat: str = Form(""),
     auto_daily_publish_enable_toutiao: str = Form(""),
@@ -395,6 +398,8 @@ def update_config(
     runtime["llm"]["model"] = llm_model.strip()
     if llm_api_key.strip():
         runtime["llm"]["api_key"] = llm_api_key.strip()
+    runtime["llm"]["reasoning_effort"] = llm_reasoning_effort.strip()
+    runtime["llm"]["disable_env_proxy"] = llm_disable_env_proxy == "on"
     runtime["llm"]["draft_prompt"] = llm_draft_prompt.strip()
     runtime["draft_output_dir"] = draft_output_dir.strip()
     runtime["board_whitelist"] = [part.strip() for part in board_whitelist.split(",") if part.strip()]
@@ -506,6 +511,7 @@ def update_config(
         "hotspot_limit": max(1, min(int(auto_daily_publish_hotspot_limit), 100)),
         "draft_limit": max(1, min(int(auto_daily_publish_draft_limit), 30)),
         "publish_limit": max(1, min(int(auto_daily_publish_publish_limit), 10)),
+        "min_publish_score": max(0.0, min(float(auto_daily_publish_min_publish_score), 10.0)),
         "retry_count": max(1, min(int(auto_daily_publish_retry_count), 5)),
         "enable_wechat": auto_daily_publish_enable_wechat == "on",
         "enable_toutiao": auto_daily_publish_enable_toutiao == "on",
@@ -542,6 +548,7 @@ def update_config(
             f"自动热点候选：{runtime['automation']['daily_publish']['hotspot_limit']} 个",
             f"自动生成初稿：{runtime['automation']['daily_publish']['draft_limit']} 篇",
             f"自动推送发布：{runtime['automation']['daily_publish']['publish_limit']} 篇",
+            f"自动发布分数线：{runtime['automation']['daily_publish'].get('min_publish_score', 8.6):.1f}",
             f"自动任务重试：{runtime['automation']['daily_publish']['retry_count']} 次",
             f"自动任务渠道：{'公众号' if runtime['automation']['daily_publish']['enable_wechat'] else ''}{' + ' if runtime['automation']['daily_publish']['enable_wechat'] and runtime['automation']['daily_publish']['enable_toutiao'] else ''}{'头条' if runtime['automation']['daily_publish']['enable_toutiao'] else ''}".strip() or '未启用',
             f"偏好关键词：{' / '.join(runtime['automation']['daily_publish']['preference_keywords']) if runtime['automation']['daily_publish']['preference_keywords'] else '未设置'}",

@@ -25,17 +25,17 @@ WX_FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft 
 
 ARTICLE_STYLE = (
     "margin:0 auto;padding:0;color:#1f2937;"
-    f"font-family:{WX_FONT};font-size:16px;line-height:1.9;"
-    "letter-spacing:.03em;word-break:break-word;box-sizing:border-box;"
+    f"font-family:{WX_FONT};font-size:16px;line-height:1.86;"
+    "letter-spacing:.02em;word-break:break-word;box-sizing:border-box;"
 )
 
-PARAGRAPH_STYLE = "margin:0 0 18px;line-height:1.9;color:#1f2937;font-size:16px;text-align:justify;"
-H2_STYLE = "margin:34px 0 16px;padding:0 0 0 12px;border-left:4px solid #2563eb;color:#111827;font-size:21px;line-height:1.5;font-weight:700;box-sizing:border-box;"
-H3_STYLE = "margin:28px 0 12px;color:#111827;font-size:18px;line-height:1.6;font-weight:700;"
+PARAGRAPH_STYLE = "margin:0 0 16px;line-height:1.86;color:#1f2937;font-size:16px;text-align:left;"
+H2_STYLE = "margin:32px 0 14px;padding:0;color:#111827;font-size:19px;line-height:1.55;font-weight:700;box-sizing:border-box;"
+H3_STYLE = "margin:24px 0 10px;color:#111827;font-size:17px;line-height:1.6;font-weight:700;"
 STRONG_STYLE = "font-weight:700;color:#111827;"
 MUTED_STYLE = "color:#64748b;font-size:14px;line-height:1.7;"
-IMG_STYLE = "display:block;width:100%;max-width:100%;height:auto;margin:20px auto;border-radius:10px;box-sizing:border-box;"
-BLOCKQUOTE_STYLE = "margin:18px 0;padding:14px 16px;background:#f8fafc;border-left:4px solid #93c5fd;color:#475569;box-sizing:border-box;"
+IMG_STYLE = "display:block;width:100%;max-width:100%;height:auto;margin:18px auto;border-radius:8px;box-sizing:border-box;"
+BLOCKQUOTE_STYLE = "margin:18px 0;padding:14px 16px;background:#f7f8fa;border-left:3px solid #cbd5e1;color:#475569;box-sizing:border-box;"
 
 
 def _wechat_title(title: str, char_limit: int = WECHAT_TITLE_CHAR_LIMIT) -> str:

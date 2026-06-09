@@ -149,11 +149,38 @@ TITLE_TOO_GENERIC_PATTERNS = (
     r"^你可能也刷到了",
     r"^今天朋友圈刷屏",
     r"^朋友圈刷屏的这事",
+    r"^刷到.+你在想什么",
     r"^别急着下结论$",
     r"^先别急着下判断$",
+    r"别被.+带跑",
+    r"^别把.+读过头",
+    r"别让.+替你",
+    r"别只当.+看",
+    r".+和很多人想的可能不太一样$",
+    r"看热闹可以",
+    r"热闹可以看",
+    r".+真正值得看的不是热闹$",
+    r".+重点不只是.+$",
     r"^这事和你有关$",
     r"^这事.+有关$",
     r"^这件事.+有关$",
+)
+
+TITLE_FORBIDDEN_TEMPLATES = (
+    "和很多人想的可能不太一样",
+    "你可能也刷到了",
+    "今天朋友圈刷屏",
+    "先别急着下结论",
+    "先别急着下判断",
+    "别被带跑",
+    "别被一个镜头带跑",
+    "别让几秒剪辑替你站队",
+    "别把一张图读过头",
+    "看热闹可以",
+    "热闹可以看",
+    "真正值得看的不是热闹",
+    "重点不只是",
+    "这事和你有关吗",
 )
 
 TITLE_PRICE_DROP_KEYWORDS = (
@@ -291,6 +318,17 @@ def _image_generation_endpoint(base_url: str) -> str:
     return f"{endpoint}/images/generations"
 
 
+def _chat_completions_endpoint(base_url: str) -> str:
+    endpoint = (base_url or "").rstrip("/")
+    if not endpoint:
+        return ""
+    if endpoint.endswith("/chat/completions"):
+        return endpoint
+    if endpoint.endswith("/v1"):
+        return f"{endpoint}/chat/completions"
+    return f"{endpoint}/v1/chat/completions"
+
+
 def _post_json_with_retry(
     url: str,
     headers: dict[str, str],
@@ -299,36 +337,92 @@ def _post_json_with_retry(
     retry_count: int = 3,
     backoff_seconds: float = 2.0,
     session: requests.Session | None = None,
+    disable_env_proxy: bool = False,
 ) -> requests.Response:
     last_error: Exception | None = None
     retry_count = max(1, retry_count)
-    for attempt in range(1, retry_count + 1):
-        try:
-            client = session or requests
-            response = client.post(url, headers=headers, json=payload, timeout=timeout)
-            if response.status_code in (429, 500, 502, 503, 504) and attempt < retry_count:
-                last_error = requests.HTTPError(
-                    f"retryable status {response.status_code}: {response.text[:200]}",
-                    response=response,
-                )
+    owned_session: requests.Session | None = None
+    if session is None and disable_env_proxy:
+        owned_session = requests.Session()
+        owned_session.trust_env = False
+        session = owned_session
+    try:
+        for attempt in range(1, retry_count + 1):
+            try:
+                client = session or requests
+                response = client.post(url, headers=headers, json=payload, timeout=timeout)
+                if response.status_code in (429, 500, 502, 503, 504) and attempt < retry_count:
+                    last_error = requests.HTTPError(
+                        f"retryable status {response.status_code}: {response.text[:200]}",
+                        response=response,
+                    )
+                    time.sleep(backoff_seconds * attempt)
+                    continue
+                response.raise_for_status()
+                return response
+            except RETRYABLE_REQUEST_EXCEPTIONS as exc:
+                last_error = exc
+                if attempt >= retry_count:
+                    break
                 time.sleep(backoff_seconds * attempt)
-                continue
-            response.raise_for_status()
-            return response
-        except RETRYABLE_REQUEST_EXCEPTIONS as exc:
-            last_error = exc
-            if attempt >= retry_count:
-                break
-            time.sleep(backoff_seconds * attempt)
-        except requests.HTTPError as exc:
-            last_error = exc
-            status_code = exc.response.status_code if exc.response is not None else None
-            if status_code not in (429, 500, 502, 503, 504) or attempt >= retry_count:
-                break
-            time.sleep(backoff_seconds * attempt)
-    if last_error:
-        raise last_error
-    raise RuntimeError("request failed without response")
+            except requests.HTTPError as exc:
+                last_error = exc
+                status_code = exc.response.status_code if exc.response is not None else None
+                if status_code not in (429, 500, 502, 503, 504) or attempt >= retry_count:
+                    break
+                time.sleep(backoff_seconds * attempt)
+        if last_error:
+            raise last_error
+        raise RuntimeError("request failed without response")
+    finally:
+        if owned_session is not None:
+            owned_session.close()
+
+
+def _disable_env_proxy_for_llm(llm_config: dict) -> bool:
+    """Whether chat/completions should ignore HTTP(S)_PROXY from the host env.
+
+    Local Windows global proxy often breaks some China-hosted model endpoints with
+    SSL EOF during TLS handshake. Default to direct connection for LLM calls unless
+    config explicitly sets disable_env_proxy=false.
+    """
+    if "disable_env_proxy" in (llm_config or {}):
+        return bool(llm_config.get("disable_env_proxy"))
+    return True
+
+
+def _apply_reasoning_options(payload: dict, llm_config: dict) -> None:
+    effort = (
+        llm_config.get("reasoning_effort")
+        or llm_config.get("reasoning_level")
+        or llm_config.get("reasoning")
+    )
+    if isinstance(effort, str) and effort.strip():
+        value = effort.strip()
+        aliases = {
+            "超高": "xhigh",
+            "最高": "xhigh",
+            "高": "high",
+            "中": "medium",
+            "低": "low",
+        }
+        payload["reasoning_effort"] = aliases.get(value, value)
+    reasoning = llm_config.get("reasoning_options")
+    if isinstance(reasoning, dict) and reasoning:
+        payload["reasoning"] = reasoning
+
+
+def _chat_message_text(message: dict) -> str:
+    content = message.get("content") if isinstance(message, dict) else ""
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    # Some OpenAI-compatible reasoning gateways return the visible answer in
+    # reasoning_content with content left empty. Keep this fallback so direct
+    # China-hosted Mimo calls remain usable when proxies are disabled.
+    reasoning_content = message.get("reasoning_content") if isinstance(message, dict) else ""
+    if isinstance(reasoning_content, str) and reasoning_content.strip():
+        return reasoning_content.strip()
+    return ""
 
 
 def _decode_data_url(value: str) -> tuple[bytes, str]:
@@ -404,12 +498,15 @@ def _wechat_hottrend_style_brief() -> str:
     """Current WeChat hot-article patterns distilled from live ranking samples."""
     return "\n".join(
         [
-            "- 开头先抛场景、冲突、结果或反差，别先铺背景。",
-            "- 正文以短段落为主，像微信里聊天，不像新闻稿或作文。",
-            "- 小标题要自然、口语化，别写成“原因分析/应对建议/第一第二第三”。",
-            "- 事实先讲清，再补一层人话翻译，少术语、少大词。",
-            "- 结尾收得实在一点，别强行升华。",
-            "- 图片要按题材来：快讯可多一点，观点/科普可少图甚至无图。",
+            "- 标题先给具体对象，再给冲突或读者利益点；不要只给“理性看待/别被带跑”这种态度。",
+            "- 今日头条标题尽量 18-28 个中文字符，超过 30 字会被截断；少用长冒号标题。",
+            "- 开头先抛场景、冲突、结果或反差，120 字内让读者知道“这事跟我有什么关系”。",
+            "- 正文以短段落为主，1-3 句一段，像微信里聊天，不像新闻稿、作文或知识清单。",
+            "- 小标题要自然、口语化，像编辑写的转场，别写成“原因分析/应对建议/第一第二第三”。",
+            "- 每 3-5 段给一个轻转折或人话判断：别只站队，也别只提醒冷静。",
+            "- 事实先讲清，再补一层人话翻译；少术语、少大词，少空泛价值判断。",
+            "- 结尾收得实在一点，落到一个普通人能记住的小判断，别强行升华。",
+            "- 配图按题材和转折来：封面抓具体场景，正文图补人物/物件/环境细节；不要生成和正文无关的泛生活图。",
         ]
     )
 
@@ -1534,6 +1631,33 @@ def _looks_too_generic_for_distribution(title: str) -> bool:
     return any(re.search(pattern, clean) for pattern in TITLE_TOO_GENERIC_PATTERNS)
 
 
+def _fit_distribution_title(title: str, max_chars: int = 30) -> str:
+    """Keep the shared WeChat/Toutiao title readable before Toutiao truncates it."""
+    clean = re.sub(r"^\s*#\s*", "", (title or "").strip())
+    clean = re.sub(r"\s+", " ", clean).strip(" #，。！？；：,.!?;:")
+    if len(clean) <= max_chars:
+        return clean
+
+    shortened = clean
+    for phrase in ("冲上热搜", "上热搜", "刷屏", "引热议", "引发热议", "网友热议"):
+        shortened = shortened.replace(phrase, "")
+    shortened = re.sub(r"\s+", " ", shortened).strip(" #，。！？；：,.!?;:")
+    if len(shortened) <= max_chars and len(shortened) >= 12:
+        return shortened
+
+    parts = [part.strip() for part in re.split(r"[：:，,；;]", shortened) if part.strip()]
+    if len(parts) >= 2:
+        left, right = parts[0], parts[1]
+        if 14 <= len(left) <= max_chars:
+            return left
+        candidate = f"{left}，{right}"
+        if len(candidate) > max_chars:
+            candidate = candidate[:max_chars]
+        return candidate.strip(" #，。！？；：,.!?;:")
+
+    return shortened[:max_chars].strip(" #，。！？；：,.!?;:")
+
+
 def _source_specific_terms(title: str, cluster: dict | None, article_sources: list[dict] | None) -> list[str]:
     pack = _extract_title_keyword_pack(title)
     support_text, _, _ = _collect_source_support_text(cluster or {"canonical_title": title}, article_sources or [])
@@ -1574,21 +1698,21 @@ def _build_engaging_fallback_title(
     if any(keyword in combined for keyword in TITLE_PRICE_DROP_KEYWORDS) and "二手油车" in fallback:
         return "二手油车卖早的人，这一轮可能最难受"
     if "高考安检" in fallback:
-        return "今年高考安检这道线，很多人可能会踩"
+        return "高考安检变严后，最容易踩坑的是这些小东西"
     if "构成作弊" in combined and "高考" in fallback:
         return "高考安检收紧后，这些东西别顺手带进考场"
     if "带入考场" in combined and "高考" in fallback:
         return "带进考场就麻烦了，今年高考安检盯得更细"
     if "双胞胎" in fallback and ("遇袭" in fallback or "一死一伤" in combined):
-        return "双胞胎姐妹遇袭刷屏，先别急着下结论"
+        return "双胞胎姐妹遇袭刷屏，真正该追问的是安全感"
     if "包场" in fallback and ("电影" in combined or "票房" in combined or "明星" in combined):
-        return "明星包场冲上热搜，重点不只是人缘"
+        return "明星包场冲上热搜，粉丝人情账又被翻出来"
     if "浪姐" in fallback and ("排名" in fallback or "人气" in fallback):
         return "浪姐人气排名刷屏，观众到底在看什么"
     if "AI" in fallback and "工具" in combined:
         return f"{fallback}，普通人真会用和跟风用差别很大"
     if len(fallback) <= 12:
-        return f"{fallback}，和很多人想的可能不太一样"
+        return f"{fallback}，普通人最该看懂的是影响"
     return fallback
 
 
@@ -1721,6 +1845,14 @@ def _ensure_title_alignment(
         "generic_for_distribution": generic_for_distribution,
         "overlap_ratio": round(overlap_ratio, 3),
     }
+    fitted_title = _fit_distribution_title(final_title)
+    if fitted_title and fitted_title != final_title:
+        report["changed"] = True
+        report["pre_fit_title"] = final_title
+        report["final_title"] = fitted_title
+        report["reason"] = (report.get("reason") or "") + "；标题已压缩到头条不易截断的长度"
+        final_title = fitted_title
+        final_content = _replace_or_prepend_title_heading(content_md, final_title)
     return final_title, final_content, report
 
 
@@ -1793,6 +1925,7 @@ def generate_wechat_draft(
 - 第一段不要交代“近日”“据悉”“有媒体报道”，直接从读者能感知的场景、反差、利益冲突或一句判断切入。
 - 开头可以像这样，但不要照抄：“你可能也遇到过这种情况……”“这事乍一看离普通人很远，但真正麻烦的地方在后面。”“别急着站队，先看它会怎么落到自己身上。”
 - 每写一段，都问自己一句：这段和普通人有什么关系？如果没关系，就删掉。
+- 不要连续复述新闻细节。具体人物、地点、金额、时间线只保留支撑观点必须用的部分；整篇文章里“新闻复述”不要超过三成，更多篇幅用来解释它怎么落到普通人的选择、风险、情绪或判断上。
 - 少用大词，多用具体场景。比如不要只说“隐私风险”，要说“你填过的手机号、定位、照片，可能会被怎样使用”。
 - 允许有态度，但态度要克制；不要喊口号，不要上价值，不要制造恐慌。
 - 像人写文章：可以有停顿、有转折、有轻微口语感，例如“说真的”“别急”“问题是”“但这里有个坑”“说白了”；不要油腻，不要段段金句。
@@ -1826,11 +1959,21 @@ def generate_wechat_draft(
 ## 输出格式
 - 第一行必须是 Markdown 一级标题：# 标题
 - 标题要像公众号标题，短一点、有代入感，不要只复制热搜标题。
+- 标题同时适配今日头条：控制在 18-28 个中文字符，最多不超过 30 个中文字符；超过 30 字会被头条截断，宁可短一点也不要长冒号标题。
 - 标题必须保留热搜核心名词、人名、平台名或事件名里的至少一个具体词；不能只写“这事”“你可能也刷到了”“朋友圈刷屏”“先别急着下结论”这种看不出主题的泛标题。
-- 标题适配今日头条推荐流：前半句先给具体对象，后半句给普通人的阅读理由，例如“浪姐人气排名刷屏，观众到底在看什么”，不要让标题和正文脱节。
+- 标题适配今日头条推荐流：前半句先给具体对象，后半句给冲突、悬念或普通人的阅读理由，例如“浪姐人气排名刷屏，观众到底在看什么”，不要让标题和正文脱节。
+- 标题不要只表达态度。不要把标题写成“别过度解读/别被带跑/保持理性/重点不只是热闹”，而要写清楚“谁、什么事、矛盾在哪里、读者为什么要点开”。
+- 标题不要套模板。严禁再用这些句式：“和很多人想的可能不太一样”“你可能也刷到了”“今天朋友圈刷屏”“别把……读过头”“别被……带跑”“看热闹可以”“这事和你有关吗”。
+- 标题优先用这类结构：
+  - 具体热点名词 + 具体冲突：例如“外卖员困在电梯里，真正麻烦的不只是迟到”
+  - 具体人物/平台/事件 + 普通人视角：例如“面试要填家庭成员，很多人卡在这一步”
+  - 具体变化 + 直接影响：例如“高考安检更细了，最容易踩坑的是这些小东西”
+- 标题要避免长套话和万能后缀，少用“刷屏/上热搜”当唯一卖点；如果用了“刷屏/上热搜”，后半句必须给具体冲突或具体利益点。
 - 正文 3-4 个自然小标题即可，小标题要像编辑起的，不要像报告目录；不要写“作为消费者，你需要知道什么？”“原因分析”“应对建议”这类课堂式标题。
 - 每段 1-3 句话，适合手机阅读。
 - 尽量不用列表。除非必须列出步骤，否则不要用短横线 bullet；更不要用有序编号。
+- 正文不要平均铺陈。前 3 段要给出钩子、事件人话翻译、读者关系；中间用 2-3 个短小转场推进；结尾只收一个实在判断。
+- 配图由程序插入，但写作时要给正文留下“可配图的画面”：人物动作、手机场景、账单/票根/屏幕细节、通勤/办公室/家庭环境，而不是空泛概念。
 - 结尾自然收住，可以是一句个人化提醒或判断；不要写“欢迎留言”“对此你怎么看”。
 - 不要写“配图”“见下图”“图片占位符”，图片会由程序自动插入。
 
@@ -1847,6 +1990,7 @@ def generate_wechat_draft(
 - 不要使用 Markdown 有序列表（1. / 2. / 3.）或“一是、二是、三是”。
 - 尽量不要用短横线 bullet。不要把建议写成清单，改成几个短小自然段，像聊天一样把话说明白。
 - 小标题要自然、有情绪温度，不要写成“原因一/原因二/影响分析/优化建议/作为消费者需要知道什么/背景介绍”。
+- 标题必须再自检一次：如果标题像模板号、看不出具体热点、或者用了“和很多人想的不一样/别被带跑/读过头/这事有关”这类旧句式，必须换掉。
 - 删除所有内部占位标记：例如【需补来源】、【待核实】、“原文未明确”。
 """
     prompt = f"{prompt.rstrip()}\n\n{style_guard}"
@@ -1863,9 +2007,10 @@ def generate_wechat_draft(
         "temperature": llm_config.get("temperature", 0.65),
         "max_tokens": llm_config.get("max_tokens", 2400),
     }
+    _apply_reasoning_options(payload, llm_config)
 
     response = _post_json_with_retry(
-        f"{llm_config['base_url'].rstrip('/')}/chat/completions",
+        _chat_completions_endpoint(llm_config["base_url"]),
         headers={
             "Authorization": f"Bearer {llm_config['api_key']}",
             "Content-Type": "application/json",
@@ -1874,9 +2019,10 @@ def generate_wechat_draft(
         timeout=int(llm_config.get("timeout_seconds", 180)),
         retry_count=int(llm_config.get("retry_count", 3)),
         backoff_seconds=float(llm_config.get("retry_backoff_seconds", 2.0)),
+        disable_env_proxy=_disable_env_proxy_for_llm(llm_config),
     )
     data = response.json()
-    content = _soften_generic_headings(data["choices"][0]["message"]["content"].strip(), editorial_plan)
+    content = _soften_generic_headings(_chat_message_text(data["choices"][0]["message"]), editorial_plan)
     content = _decompose_school_essay_style(content)
     content = _humanize_article_draft(content)
     content = _de_listify_article_draft(content)
@@ -1935,6 +2081,7 @@ def polish_wechat_draft_after_self_review(
 - 开头不能是背景介绍；要换成场景、问题、反差、利益冲突或一句判断。
 - 标题是否完整、有代入感、不标题党。
 - 标题是否能一眼看出具体热点：必须保留核心名词、人名、平台名或事件名里的至少一个具体词；不要改成“这事”“你可能也刷到了”“朋友圈刷屏”这种泛标题。
+- 标题是否像机器模板号：如果用了“和很多人想的可能不太一样”“别被……带跑”“别把……读过头”“看热闹可以”“这事和你有关吗”，必须重写成更具体的标题。
 - 段落是否适合微信：短段落、自然小标题，不要长篇报告。
 - 有没有像课堂笔记、知识点清单、消费指南：如果有，把项目符号和条款改成聊天式小片段。
 - 不要出现“作为消费者，你需要知道什么？”“以下几点”“注意事项”“一文看懂”这类让人抵触的标题。
@@ -1972,8 +2119,9 @@ def polish_wechat_draft_after_self_review(
         "temperature": min(float(llm_config.get("temperature", 0.65)), 0.45),
         "max_tokens": llm_config.get("max_tokens", 2400),
     }
+    _apply_reasoning_options(payload, llm_config)
     response = _post_json_with_retry(
-        f"{llm_config['base_url'].rstrip('/')}/chat/completions",
+        _chat_completions_endpoint(llm_config["base_url"]),
         headers={
             "Authorization": f"Bearer {llm_config['api_key']}",
             "Content-Type": "application/json",
@@ -1982,9 +2130,10 @@ def polish_wechat_draft_after_self_review(
         timeout=int(llm_config.get("timeout_seconds", 180)),
         retry_count=int(llm_config.get("retry_count", 3)),
         backoff_seconds=float(llm_config.get("retry_backoff_seconds", 2.0)),
+        disable_env_proxy=_disable_env_proxy_for_llm(llm_config),
     )
     data = response.json()
-    polished = _extract_publishable_draft(data["choices"][0]["message"]["content"].strip())
+    polished = _extract_publishable_draft(_chat_message_text(data["choices"][0]["message"]))
     polished = _decompose_school_essay_style(polished)
     polished = _humanize_article_draft(polished)
     polished = _de_listify_article_draft(polished)
@@ -2118,7 +2267,7 @@ def review_wechat_draft(
 
 评分范围：0-10 分，保留 1 位小数。
 
-当前更像头部微信热搜文章的内容，分数应更高；明显的新闻稿腔、作文腔、报告腔、列表腔要降分。
+当前更像头部微信热搜/今日头条推荐流文章的内容，分数应更高；明显的新闻稿腔、作文腔、报告腔、列表腔要降分。
 
 请按公众号发布前审核标准评分，重点看：
 1. 标题是否清晰、有打开欲，但不标题党。
@@ -2128,12 +2277,22 @@ def review_wechat_draft(
 5. 段落节奏是否适合手机端阅读。
 6. 是否具备发布可用度：越接近可直接发，分数越高。
 7. 是否符合当前微信热搜文章的真实阅读节奏：开头快、段落短、表达口语化、标题和正文强相关。
+8. 是否适合今日头条推荐流：标题 18-28 字更优，能一眼看出具体对象和冲突，正文有可配图的具体画面。
 
 扣分项：
 - 明显空泛、模板化、复述材料、像新闻播报。
+- 新闻细节复述过多，像把来源材料重新讲了一遍，最高只能给 7.9 分。
 - 编造事实、过度煽动、事实与观点混在一起。
 - 段落太长、标题生硬、结尾套路。
 - 与微信公众号读者场景不匹配。
+- 标题如果用了“和很多人想的可能不太一样”“你可能也刷到了”“别被……带跑”“别把……读过头”“看热闹可以”“这事和你有关吗”等模板化句式，最高只能给 7.6 分。
+- 标题如果用了“别让几秒剪辑替你站队”“真正值得看的不是热闹”“重点不只是……”这类只表达态度的万能后缀，最高只能给 7.5 分。
+- 标题看不出具体热点名词、人物、平台或事件，最高只能给 7.5 分。
+- 标题超过 30 个中文字符，或长冒号后缀导致头条端容易被截断，最高只能给 7.8 分。
+- 只有态度没有信息增量、只提醒“别过度解读/别急着站队/保持理性”，最高只能给 7.4 分。
+- 正文没有给普通人带来新的理解、判断框架或具体场景，最高只能给 7.6 分。
+- 正文没有可视化场景，导致配图只能生成泛生活图、泛手机图，最高只能给 7.8 分。
+- 开头 120 字内看不出“这事和普通人有什么关系”，最高只能给 7.7 分。
 
 只输出 JSON，不要输出 Markdown，不要解释 JSON 之外的内容：
 {{
@@ -2158,9 +2317,10 @@ def review_wechat_draft(
         "temperature": 0.2,
         "max_tokens": 1200,
     }
+    _apply_reasoning_options(payload, llm_config)
 
     response = _post_json_with_retry(
-        f"{llm_config['base_url'].rstrip('/')}/chat/completions",
+        _chat_completions_endpoint(llm_config["base_url"]),
         headers={
             "Authorization": f"Bearer {llm_config['api_key']}",
             "Content-Type": "application/json",
@@ -2169,10 +2329,11 @@ def review_wechat_draft(
         timeout=int(llm_config.get("timeout_seconds", 180)),
         retry_count=int(llm_config.get("retry_count", 3)),
         backoff_seconds=float(llm_config.get("retry_backoff_seconds", 2.0)),
+        disable_env_proxy=_disable_env_proxy_for_llm(llm_config),
     )
     data = response.json()
     message = data["choices"][0]["message"]
-    raw = (message.get("content") or message.get("reasoning_content") or "").strip()
+    raw = _chat_message_text(message)
     score = _parse_review_score(raw)
     summary = _parse_review_summary(raw)
     return score, summary, prompt[:1200]

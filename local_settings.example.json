@@ -85,7 +85,17 @@
     "draft_generation_attempts": 3,
     "draft_prompt": "",
     "auto_polish_draft": true,
-    "fallback_models": []
+    "fallback_models": [
+      {
+        "name": "mimo-v2.5",
+        "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+        "api_key": "",
+        "model": "mimo-v2.5",
+        "disable_env_proxy": true
+      }
+    ],
+    "reasoning_effort": "xhigh",
+    "disable_env_proxy": true
   },
   "draft_output_dir": "T:\\微信公众号文档",
   "wechat_gateway": {
@@ -146,7 +156,8 @@
       "schedule_times": [
         "07:00",
         "17:00"
-      ]
+      ],
+      "min_publish_score": 8.6
     }
   },
   "hotspot_cleanup": {
