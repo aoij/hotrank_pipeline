@@ -27,8 +27,10 @@ _SCHEDULER_STOP = threading.Event()
 _SCHEDULER_STATE = {
     "enabled": False,
     "time": "07:00",
-    "draft_limit": 10,
-    "publish_limit": 4,
+    "times": ["07:00"],
+    "hotspot_limit": 30,
+    "draft_limit": 5,
+    "publish_limit": 3,
     "retry_count": 2,
     "enable_wechat": True,
     "enable_toutiao": True,
@@ -167,13 +169,59 @@ def _normalize_schedule_time(value: str) -> str:
     return f"{hour:02d}:{minute:02d}"
 
 
+def _normalize_schedule_times(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        raw_parts = [str(item).strip() for item in value]
+    else:
+        raw = str(value or "07:00")
+        raw_parts = [part.strip() for part in raw.replace("，", ",").replace("；", ",").replace(";", ",").split(",")]
+    times: list[str] = []
+    seen: set[str] = set()
+    for part in raw_parts:
+        if not part:
+            continue
+        normalized = _normalize_schedule_time(part)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        times.append(normalized)
+    if not times:
+        times = ["07:00"]
+    return sorted(times)
+
+
+def _today_slot_history_status(schedule_time: str) -> tuple[str, str]:
+    slot = _normalize_schedule_time(schedule_time)
+    for item in _today_history_items():
+        if str(item.get("schedule_time") or "").strip() != slot:
+            continue
+        return str(item.get("status") or ""), str(item.get("message") or "")
+    return "", ""
+
+
+def _today_successful_schedule_times() -> list[str]:
+    slots: list[str] = []
+    seen: set[str] = set()
+    for item in _today_history_items():
+        if str(item.get("status") or "").lower() != "success":
+            continue
+        slot = _normalize_schedule_time(str(item.get("schedule_time") or "07:00"))
+        if slot not in seen:
+            seen.add(slot)
+            slots.append(slot)
+    return sorted(slots)
+
+
 def _refresh_state(settings: Settings) -> dict:
     config = _daily_publish_config(settings)
+    schedule_times = _normalize_schedule_times(config.get("schedule_times") or config.get("schedule_time") or "07:00")
     with _SCHEDULER_LOCK:
         _SCHEDULER_STATE["enabled"] = bool(config.get("enabled", False))
-        _SCHEDULER_STATE["time"] = _normalize_schedule_time(str(config.get("schedule_time") or "07:00"))
-        _SCHEDULER_STATE["draft_limit"] = max(1, int(config.get("draft_limit") or 10))
-        _SCHEDULER_STATE["publish_limit"] = max(1, int(config.get("publish_limit") or 4))
+        _SCHEDULER_STATE["times"] = schedule_times
+        _SCHEDULER_STATE["time"] = " / ".join(schedule_times)
+        _SCHEDULER_STATE["hotspot_limit"] = max(1, int(config.get("hotspot_limit") or 30))
+        _SCHEDULER_STATE["draft_limit"] = max(1, int(config.get("draft_limit") or 5))
+        _SCHEDULER_STATE["publish_limit"] = max(1, int(config.get("publish_limit") or 3))
         _SCHEDULER_STATE["retry_count"] = max(1, int(config.get("retry_count") or 2))
         _SCHEDULER_STATE["enable_wechat"] = bool(config.get("enable_wechat", True))
         _SCHEDULER_STATE["enable_toutiao"] = bool(config.get("enable_toutiao", True))
@@ -185,7 +233,8 @@ def _refresh_state(settings: Settings) -> dict:
         state = dict(_SCHEDULER_STATE)
         state["active_run"] = bool(_PROCESS_RUN_LOCK.locked() or _DAILY_RUN_LOCK_PATH.exists())
         state["file_lock_path"] = str(_DAILY_RUN_LOCK_PATH)
-        state["today_has_success"] = today_has_successful_daily_publish()
+        state["today_successful_slots"] = _today_successful_schedule_times()
+        state["today_has_success"] = bool(state["today_successful_slots"])
         return state
 
 
@@ -243,6 +292,8 @@ def run_daily_publish_once(
     *,
     trigger: str = "cli",
     force: bool = False,
+    schedule_time: str | None = None,
+    hotspot_limit: int | None = None,
     draft_limit: int | None = None,
     publish_limit: int | None = None,
     log_cb: Callable[[str, str], None] | None = None,
@@ -280,22 +331,28 @@ def run_daily_publish_once(
                     log_cb("info", message)
                 return _skip_payload("disabled", message, trigger=trigger, state=state)
 
-            latest_status, latest_message = _today_latest_history_status()
+            schedule_times = state.get("times") or [_normalize_schedule_time(str(state.get("time") or "07:00"))]
+            current_schedule_time = _normalize_schedule_time(schedule_time or schedule_times[0])
+
+            latest_status, latest_message = _today_slot_history_status(current_schedule_time)
             if not force and latest_status == "success":
-                message = f"今日已有成功执行记录，已跳过本次触发：{latest_message or 'status=success'}"
+                message = f"当前时间槽今日已有成功执行记录，已跳过本次触发：schedule_time={current_schedule_time}｜{latest_message or 'status=success'}"
                 if log_cb:
                     log_cb("info", message)
                 return _skip_payload("skipped", message, trigger=trigger, state=state)
 
+            final_hotspot_limit = max(1, int(hotspot_limit or state["hotspot_limit"]))
             final_draft_limit = max(1, int(draft_limit or state["draft_limit"]))
             final_publish_limit = max(1, int(publish_limit or state["publish_limit"]))
             append_runtime_log(
                 "info",
-                f"[自动任务] 触发执行：trigger={trigger}｜force={force}｜schedule={state['time']}｜draft_limit={final_draft_limit}｜publish_limit={final_publish_limit}",
+                f"[自动任务] 触发执行：trigger={trigger}｜force={force}｜schedule={current_schedule_time}｜hotspot_limit={final_hotspot_limit}｜draft_limit={final_draft_limit}｜publish_limit={final_publish_limit}",
                 source="scheduler",
             )
             result = run_daily_auto_publish(
                 settings,
+                schedule_time=current_schedule_time,
+                hotspot_limit=final_hotspot_limit,
                 draft_limit=final_draft_limit,
                 publish_limit=final_publish_limit,
                 progress_cb=progress,
@@ -326,9 +383,10 @@ def run_daily_publish_once(
         brief = create_daily_publish_brief(
             run_at=run_at_text,
             status="error",
-            schedule_time=state.get("time") or "07:00",
-            draft_limit=int(draft_limit or state.get("draft_limit") or 10),
-            publish_limit=int(publish_limit or state.get("publish_limit") or 4),
+            schedule_time=schedule_time or (state.get("times") or [state.get("time") or "07:00"])[0],
+            hotspot_limit=int(hotspot_limit or state.get("hotspot_limit") or 30),
+            draft_limit=int(draft_limit or state.get("draft_limit") or 5),
+            publish_limit=int(publish_limit or state.get("publish_limit") or 3),
             retry_count=int(state.get("retry_count") or 2),
             enable_wechat=bool(state.get("enable_wechat", True)),
             enable_toutiao=bool(state.get("enable_toutiao", True)),
@@ -346,9 +404,10 @@ def run_daily_publish_once(
                 "run_at": run_at_text,
                 "status": "error",
                 "message": message,
-                "schedule_time": state.get("time") or "07:00",
-                "draft_limit": int(draft_limit or state.get("draft_limit") or 10),
-                "publish_limit": int(publish_limit or state.get("publish_limit") or 4),
+                "schedule_time": schedule_time or (state.get("times") or [state.get("time") or "07:00"])[0],
+                "hotspot_limit": int(hotspot_limit or state.get("hotspot_limit") or 30),
+                "draft_limit": int(draft_limit or state.get("draft_limit") or 5),
+                "publish_limit": int(publish_limit or state.get("publish_limit") or 3),
                 "retry_count": int(state.get("retry_count") or 2),
                 "enable_wechat": bool(state.get("enable_wechat", True)),
                 "enable_toutiao": bool(state.get("enable_toutiao", True)),
@@ -401,26 +460,45 @@ def trigger_daily_publish_now(settings: Settings) -> bool:
 
 
 def _scheduler_loop(settings: Settings) -> None:
-    last_run_date = ""
+    attempted_slots: set[str] = set()
+    last_seen_date = ""
     while not _SCHEDULER_STOP.is_set():
         state = _refresh_state(settings)
         now = datetime.now()
         current_date = now.strftime("%Y-%m-%d")
         current_time = now.strftime("%H:%M")
-        should_run_today = state["enabled"] and current_time >= state["time"] and last_run_date != current_date
-        if should_run_today:
-            latest_status, latest_message = _today_latest_history_status()
+        if current_date != last_seen_date:
+            attempted_slots.clear()
+            last_seen_date = current_date
+
+        schedule_times = state.get("times") or [_normalize_schedule_time(str(state.get("time") or "07:00"))]
+        due_slots: list[str] = []
+        if state["enabled"]:
+            for slot in schedule_times:
+                slot_key = f"{current_date}:{slot}"
+                if current_time < slot or slot_key in attempted_slots:
+                    continue
+                latest_status, _latest_message = _today_slot_history_status(slot)
+                if latest_status == "success":
+                    attempted_slots.add(slot_key)
+                    continue
+                due_slots.append(slot)
+
+        if due_slots:
+            # 如果服务是在多个时间点之后才启动，只补跑最近的一个时间槽，避免同一时刻连续发布多轮。
+            for slot in due_slots:
+                attempted_slots.add(f"{current_date}:{slot}")
+            selected_slot = due_slots[-1]
+            latest_status, latest_message = _today_slot_history_status(selected_slot)
             if latest_status == "success":
-                last_run_date = current_date
                 append_runtime_log(
                     "info",
-                    f"[自动任务] 今日已有执行记录，跳过补跑：status={latest_status}｜{latest_message}",
+                    f"[自动任务] 当前时间槽已有执行记录，跳过补跑：slot={selected_slot}｜status={latest_status}｜{latest_message}",
                     source="scheduler",
                 )
                 _SCHEDULER_STOP.wait(20)
                 continue
-            last_run_date = current_date
-            run_daily_publish_once(settings, trigger="web-scheduler")
+            run_daily_publish_once(settings, trigger=f"web-scheduler-{selected_slot}", schedule_time=selected_slot)
         _SCHEDULER_STOP.wait(20)
 
 

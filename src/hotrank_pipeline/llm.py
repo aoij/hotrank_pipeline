@@ -145,6 +145,17 @@ TITLE_NARRATIVE_MARKERS = (
     "这一轮",
 )
 
+TITLE_TOO_GENERIC_PATTERNS = (
+    r"^你可能也刷到了",
+    r"^今天朋友圈刷屏",
+    r"^朋友圈刷屏的这事",
+    r"^别急着下结论$",
+    r"^先别急着下判断$",
+    r"^这事和你有关$",
+    r"^这事.+有关$",
+    r"^这件事.+有关$",
+)
+
 TITLE_PRICE_DROP_KEYWORDS = (
     "价格崩盘",
     "价格跳水",
@@ -383,6 +394,12 @@ def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
+def _compact_keyword_text(text: str, limit: int = 80) -> str:
+    value = re.sub(r"[#>*_`!\[\]\(\)]", " ", text or "")
+    value = re.sub(r"\s+", " ", value).strip(" ，。！？、；：")
+    return value[:limit]
+
+
 def _wechat_hottrend_style_brief() -> str:
     """Current WeChat hot-article patterns distilled from live ranking samples."""
     return "\n".join(
@@ -431,43 +448,107 @@ def _article_image_plan(title: str, content_md: str, image_config: dict) -> dict
     desired = 2
     search_hint = "城市 生活 人物 场景 真实 摄影 无水印"
     role_templates = ["封面主视觉", "中段场景图", "细节补充图", "收束氛围图"]
+    visual_templates = [
+        "普通人在手机上刷到这条热点，屏幕内容虚化不可读，画面重点是停顿、犹豫和真实生活环境",
+        "城市日常场景里的普通人交流讨论，像手机端新闻热点引发身边人聊天，不出现可识别公众人物",
+        "桌面、手机、咖啡杯或通勤环境的细节，表达信息过载和重新判断，不出现文字与Logo",
+        "安静的生活场景收束，人物背影或手部动作，表达冷静下来继续生活",
+    ]
 
-    if _contains_any(text, ("广告", "代言", "品牌", "耳机", "新品", "发布会", "宋威龙", "明星")):
+    if _contains_any(text, ("跑男", "白鹿", "浪姐", "综艺", "明星", "电影", "包场", "票房", "影院", "演唱会", "剧集", "艺人")):
+        topic = "entertainment"
+        topic_label = "娱乐/影视热点向"
+        desired = 3
+        search_hint = "影院 观众 电影票 手机 社交媒体 真实 摄影 无水印"
+        role_templates = ["封面主视觉", "社交讨论图", "影院/票根细节图", "情绪收束图"]
+        visual_templates = [
+            "电影院大厅或取票机前的普通观众，手里拿着电影票或手机购票页面，海报全部虚化不可读，不出现明星脸",
+            "朋友或同事在咖啡馆/办公室看手机讨论热搜，手机屏幕虚化，表达围观和人情站台",
+            "电影票、座椅、爆米花、手机购票界面的局部细节，突出“包场/支持/社交人情”的真实氛围",
+            "夜晚影院散场后的普通人背影，表达热闹之后的冷静观察",
+        ]
+    elif _contains_any(text, ("广告", "代言", "品牌", "耳机", "新品", "发布会", "宋威龙")):
         topic = "promo"
-        topic_label = "品牌/广告向"
-        desired = 1
-        search_hint = "时尚 产品 人物 真实 摄影 高级感 无水印"
-        role_templates = ["封面主视觉"]
-    elif _contains_any(text, ("AI", "人工智能", "大模型", "工具", "软件", "应用", "教程", "提示词", "网络安全", "隐私", "诈骗", "密码", "微信", "公众号")):
+        topic_label = "品牌/消费热点向"
+        desired = 2
+        search_hint = "产品 发布会 消费 决策 真实 摄影 高级感 无水印"
+        role_templates = ["封面主视觉", "消费决策图", "细节补充图"]
+        visual_templates = [
+            "普通人在商场或桌面前查看新品信息，产品和手机界面虚化不可读，不出现品牌Logo",
+            "桌面上的手机、耳机、购物页面局部细节，表达消费决策和跟风购买的犹豫",
+            "城市商圈橱窗前的普通人背影，画面真实克制，不像广告海报",
+        ]
+    elif _contains_any(text, ("AI", "人工智能", "大模型", "工具", "软件", "应用", "教程", "提示词", "网络安全", "隐私", "诈骗", "密码", "微信", "公众号")) and not _contains_any(text, ("高考", "考试", "考场", "作文", "英语", "数学", "学生", "家长", "学校", "校园", "老师", "教师")):
         topic = "tech_tool"
         topic_label = "科技/工具向"
         desired = 3
         search_hint = "科技 办公 电脑 手机 使用场景 真实 摄影 无水印"
         role_templates = ["封面主视觉", "使用场景图", "关键细节图", "转折补充图"]
+        visual_templates = [
+            "普通人在电脑和手机前处理消息或工具页面，屏幕内容虚化不可读，像真实办公桌抓拍",
+            "手指操作手机或电脑键盘的近景，表达工具使用、隐私设置或安全提醒",
+            "聊天窗口、验证码、设置页面等抽象为虚化界面细节，不出现真实品牌和可读文字",
+            "下班后的书桌和设备，表达把工具用回日常生活",
+        ]
     elif _contains_any(text, ("寿命", "健康", "疾病", "医生", "睡眠", "饮食", "医院", "症状", "长寿", "养生")):
         topic = "health"
         topic_label = "健康科普向"
         desired = 3
         search_hint = "健康 生活 医生 咨询 日常场景 真实 摄影 无水印"
         role_templates = ["封面主视觉", "生活场景图", "动作细节图", "收束氛围图"]
+        visual_templates = [
+            "普通人在家里或诊室外看健康信息，画面克制，不出现病历文字和可识别人脸",
+            "水杯、药盒、睡眠用品、运动鞋等生活细节，表达日常健康选择",
+            "医生与普通人沟通的背影或手部细节，不出现医院名称和隐私信息",
+            "清晨散步或居家休息的真实场景，表达可执行的日常调整",
+        ]
     elif _contains_any(text, ("房价", "油价", "楼市", "股市", "基金", "消费", "价格", "通胀", "市场", "公积金", "成交")):
         topic = "market"
         topic_label = "民生/市场向"
         desired = 2
         search_hint = "财经 城市 通勤 屏幕 数据 场景 真实 摄影 无水印"
         role_templates = ["封面主视觉", "数据/场景图", "细节补充图"]
+        visual_templates = [
+            "普通人在地铁、办公室或家中看价格/账单相关信息，屏幕数据虚化不可读",
+            "手机计算器、账单、银行卡、购物小票的生活细节，表达钱包和选择压力",
+            "城市通勤人群与商业街环境，表达市场变化落到普通生活里",
+        ]
+    elif _contains_any(text, ("高考", "考试", "考场", "作文", "英语", "数学", "学生", "家长", "学校", "校园", "老师", "教师")):
+        topic = "education"
+        topic_label = "教育/考试向"
+        desired = 3
+        search_hint = "校园 考试 家长 文具 真实 摄影 无水印"
+        role_templates = ["封面主视觉", "考场外场景图", "文具/试卷细节图", "情绪收束图"]
+        visual_templates = [
+            "学校门口或考场外的家长和学生背影，真实纪实摄影，不出现校名和可识别人脸",
+            "书桌上的铅笔、橡皮、准考证样式纸张但文字虚化不可读，表达考试压力",
+            "家长在校门外等待、低头看手机的真实场景，表达牵挂和信息焦虑",
+            "傍晚校园外散场背影，表达考试之后回到生活",
+        ]
     elif _contains_any(text, ("老师", "教师", "孩子", "家庭", "婚姻", "情绪", "猝死", "父母", "校园", "故事", "女生", "男生", "赛课")):
         topic = "story"
         topic_label = "人物/故事向"
         desired = 3
         search_hint = "人物 情绪 城市 生活 场景 真实 摄影 无水印"
         role_templates = ["封面主视觉", "人物场景图", "环境细节图", "情绪收束图"]
+        visual_templates = [
+            "普通人在家中或城市角落看手机停顿的背影，表达被故事击中的瞬间，不出现具体新闻人物",
+            "家庭餐桌、办公室角落、公交站等生活环境里的普通人侧影，画面克制有真实情绪",
+            "手机、钥匙、书包、纸巾、杯子等与正文相关的生活物件细节，避免夸张摆拍",
+            "窗边或街头的安静背影，表达情绪沉淀和继续生活",
+        ]
     elif _contains_any(text, ("事故", "安全", "通报", "警方", "调查", "法院", "判决", "公共", "责任", "风险", "提醒")):
         topic = "public_event"
         topic_label = "公共事件向"
         desired = 3
         search_hint = "城市 公共安全 风险 提醒 场景 真实 摄影 无水印"
         role_templates = ["封面主视觉", "中段场景图", "提醒细节图", "收束氛围图"]
+        visual_templates = [
+            "普通人在家里低头看手机新闻，屏幕内容虚化，窗外城市阴天，表达关切和谨慎判断",
+            "城市街口、楼道、电梯口或公共空间的空镜头，画面真实克制，不像事故现场",
+            "手机通知、门禁、电梯按钮、路灯等公共安全相关细节，避免血腥和惊悚",
+            "夜晚城市街道的普通人背影，表达保持警觉但不制造恐慌",
+        ]
 
     if paragraph_count <= 2 or text_len < 420:
         desired = 1
@@ -508,6 +589,7 @@ def _article_image_plan(title: str, content_md: str, image_config: dict) -> dict
         "count": desired,
         "positions": positions,
         "roles": roles,
+        "visual_templates": visual_templates[:desired],
         "search_hint": search_hint,
         "visual_brief": visual_brief,
         "paragraph_count": paragraph_count,
@@ -682,10 +764,15 @@ def _build_image_prompts(
 
     visual_brief = str(image_plan.get("visual_brief") or _wechat_hottrend_visual_brief(max_count))
     roles = list(image_plan.get("roles") or [])
+    visual_templates = list(image_plan.get("visual_templates") or [])
+    opening_excerpt = _compact_keyword_text(_first_meaningful_paragraph(content_md), 220)
     prompts: list[str] = []
     for idx in range(max_count):
         if idx == 0:
-            section = {"title": roles[idx] if idx < len(roles) else "封面主视觉", "excerpt": sections[0].get("excerpt", "")}
+            section = {
+                "title": roles[idx] if idx < len(roles) else "封面主视觉",
+                "excerpt": opening_excerpt or sections[0].get("excerpt", ""),
+            }
         else:
             section = sections[min(idx - 1, len(sections) - 1)]
             if idx < len(roles):
@@ -702,6 +789,7 @@ def _build_image_prompts(
             "image_count": str(max_count),
             "visual_brief": visual_brief,
             "topic_label": str(image_plan.get("topic_label") or "通用热点"),
+            "visual_concept": visual_templates[idx] if idx < len(visual_templates) else "",
         }
         if prompt_template:
             prompt = _render_prompt_template(prompt_template, context)
@@ -714,6 +802,7 @@ def _build_image_prompts(
                 f"内容摘要：{context['section_excerpt']}。"
                 f"文章类型：{context['topic_label']}。"
                 f"排版节奏：{context['visual_brief']}"
+                f"这张图的具体画面必须优先按这个来画：{context['visual_concept'] or '围绕标题和小节摘要做具体生活场景'}。"
                 "画面内容：用真实生活场景、真实物件、普通人背影/手部/侧影或环境细节来表达主题，"
                 "不要做夸张隐喻，不要漂浮图标，不要把标题文字画进图片。"
                 "摄影风格：photorealistic editorial documentary photography, real-world location, natural light,"
@@ -1437,6 +1526,32 @@ def _looks_like_narrative_hook_title(title: str) -> bool:
     return len(clean) >= 14 and any(punct in clean for punct in ("，", "：", "？", "!", "！"))
 
 
+def _looks_too_generic_for_distribution(title: str) -> bool:
+    clean = re.sub(r"^\s*#\s*", "", (title or "").strip())
+    clean = re.sub(r"\s+", "", clean)
+    if not clean:
+        return True
+    return any(re.search(pattern, clean) for pattern in TITLE_TOO_GENERIC_PATTERNS)
+
+
+def _source_specific_terms(title: str, cluster: dict | None, article_sources: list[dict] | None) -> list[str]:
+    pack = _extract_title_keyword_pack(title)
+    support_text, _, _ = _collect_source_support_text(cluster or {"canonical_title": title}, article_sources or [])
+    support_norm = _normalize_text_for_matching(support_text)
+    terms: list[str] = []
+    seen: set[str] = set()
+    for term in pack["anchor_terms"] + pack["overlap_terms"]:
+        norm = _normalize_text_for_matching(term)
+        if not norm or norm in seen or norm in TITLE_ALIGNMENT_GENERIC_TERMS:
+            continue
+        if len(norm) < 2:
+            continue
+        if norm in support_norm:
+            seen.add(norm)
+            terms.append(term)
+    return terms
+
+
 def _build_engaging_fallback_title(
     fallback_title: str,
     content_md: str,
@@ -1464,6 +1579,12 @@ def _build_engaging_fallback_title(
         return "高考安检收紧后，这些东西别顺手带进考场"
     if "带入考场" in combined and "高考" in fallback:
         return "带进考场就麻烦了，今年高考安检盯得更细"
+    if "双胞胎" in fallback and ("遇袭" in fallback or "一死一伤" in combined):
+        return "双胞胎姐妹遇袭刷屏，先别急着下结论"
+    if "包场" in fallback and ("电影" in combined or "票房" in combined or "明星" in combined):
+        return "明星包场冲上热搜，重点不只是人缘"
+    if "浪姐" in fallback and ("排名" in fallback or "人气" in fallback):
+        return "浪姐人气排名刷屏，观众到底在看什么"
     if "AI" in fallback and "工具" in combined:
         return f"{fallback}，普通人真会用和跟风用差别很大"
     if len(fallback) <= 12:
@@ -1541,10 +1662,19 @@ def _ensure_title_alignment(
         term for term in anchor_terms if _normalize_text_for_matching(term) and _normalize_text_for_matching(term) in content_norm
     ]
     unsupported_mixed_terms = [term for term in unsupported_anchor_terms if re.search(r"[A-Za-z0-9]", term)]
+    specific_title_terms = _source_specific_terms(candidate_title, cluster, article_sources or [])
+    generic_for_distribution = (
+        candidate_title != fallback_title
+        and _looks_too_generic_for_distribution(candidate_title)
+        and len(specific_title_terms) < 1
+    )
 
     reasons: list[str] = []
     should_fallback = False
-    if candidate_title != fallback_title and unsupported_mixed_terms:
+    if generic_for_distribution:
+        should_fallback = True
+        reasons.append("标题过于泛化，缺少热搜核心名词，影响头条推荐点击")
+    elif candidate_title != fallback_title and unsupported_mixed_terms:
         should_fallback = True
         reasons.append("标题引入来源和正文都未出现的具体词：" + "、".join(unsupported_mixed_terms[:3]))
     elif candidate_title != fallback_title and unsupported_anchor_terms and weak_source:
@@ -1562,7 +1692,12 @@ def _ensure_title_alignment(
 
     final_title = candidate_title
     if should_fallback:
-        if _looks_like_narrative_hook_title(candidate_title) and not unsupported_mixed_terms and overlap_ratio >= 0.18:
+        if (
+            not generic_for_distribution
+            and _looks_like_narrative_hook_title(candidate_title)
+            and not unsupported_mixed_terms
+            and overlap_ratio >= 0.18
+        ):
             reasons = ["标题与内容相关，保留更有传播性的表达"]
         else:
             final_title = _build_engaging_fallback_title(fallback_title, content_md, cluster, article_sources)
@@ -1582,6 +1717,8 @@ def _ensure_title_alignment(
         "effective_source_count": effective_source_count,
         "unsupported_terms": unsupported_anchor_terms[:6],
         "supported_terms": (supported_source_terms + supported_content_terms)[:8],
+        "specific_title_terms": specific_title_terms[:8],
+        "generic_for_distribution": generic_for_distribution,
         "overlap_ratio": round(overlap_ratio, 3),
     }
     return final_title, final_content, report
@@ -1689,6 +1826,8 @@ def generate_wechat_draft(
 ## 输出格式
 - 第一行必须是 Markdown 一级标题：# 标题
 - 标题要像公众号标题，短一点、有代入感，不要只复制热搜标题。
+- 标题必须保留热搜核心名词、人名、平台名或事件名里的至少一个具体词；不能只写“这事”“你可能也刷到了”“朋友圈刷屏”“先别急着下结论”这种看不出主题的泛标题。
+- 标题适配今日头条推荐流：前半句先给具体对象，后半句给普通人的阅读理由，例如“浪姐人气排名刷屏，观众到底在看什么”，不要让标题和正文脱节。
 - 正文 3-4 个自然小标题即可，小标题要像编辑起的，不要像报告目录；不要写“作为消费者，你需要知道什么？”“原因分析”“应对建议”这类课堂式标题。
 - 每段 1-3 句话，适合手机阅读。
 - 尽量不用列表。除非必须列出步骤，否则不要用短横线 bullet；更不要用有序编号。
@@ -1795,6 +1934,7 @@ def polish_wechat_draft_after_self_review(
 - 开头是否能抓住普通读者：前 120 字内讲清“这事和我有什么关系”。
 - 开头不能是背景介绍；要换成场景、问题、反差、利益冲突或一句判断。
 - 标题是否完整、有代入感、不标题党。
+- 标题是否能一眼看出具体热点：必须保留核心名词、人名、平台名或事件名里的至少一个具体词；不要改成“这事”“你可能也刷到了”“朋友圈刷屏”这种泛标题。
 - 段落是否适合微信：短段落、自然小标题，不要长篇报告。
 - 有没有像课堂笔记、知识点清单、消费指南：如果有，把项目符号和条款改成聊天式小片段。
 - 不要出现“作为消费者，你需要知道什么？”“以下几点”“注意事项”“一文看懂”这类让人抵触的标题。

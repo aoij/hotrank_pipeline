@@ -619,6 +619,127 @@ def find_existing_draft_for_topic(
             return None
 
 
+def find_published_draft_for_topic(
+    settings: Settings,
+    *,
+    cluster_id: int | None = None,
+    canonical_title: str = "",
+    draft_title: str = "",
+    exclude_draft_id: int | None = None,
+    lookback_limit: int = 2000,
+) -> dict | None:
+    """Return a previously published draft for the same topic, if any.
+
+    Published means it has been uploaded/published to either WeChat or Toutiao.
+    This intentionally guards at topic level, not only draft id level, so a later
+    regenerated draft for the same hotspot will not be auto-published again.
+    """
+    clean_title = (canonical_title or "").strip()
+    clean_draft_title = (draft_title or "").strip()
+    exclude_id = int(exclude_draft_id or 0)
+    with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            exact_params: list = []
+            exact_parts: list[str] = []
+            if cluster_id:
+                exact_parts.append("d.cluster_id = %s")
+                exact_params.append(int(cluster_id))
+            if clean_title:
+                exact_parts.append("tc.canonical_title = %s")
+                exact_params.append(clean_title)
+            if clean_draft_title:
+                exact_parts.append("d.title = %s")
+                exact_params.append(clean_draft_title)
+            if exact_parts:
+                params: list = []
+                exclude_sql = ""
+                if exclude_id > 0:
+                    exclude_sql = "and d.id <> %s"
+                    params.append(exclude_id)
+                params.extend(exact_params)
+                cur.execute(
+                    f"""
+                    select
+                        d.id,
+                        d.cluster_id,
+                        d.title,
+                        d.review_score,
+                        d.wechat_uploaded_at,
+                        d.toutiao_uploaded_at,
+                        d.created_at,
+                        tc.canonical_title,
+                        to_char(d.wechat_uploaded_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as wechat_uploaded_at_text,
+                        to_char(d.toutiao_uploaded_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as toutiao_uploaded_at_text,
+                        to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
+                    from article_drafts d
+                    join topic_clusters tc on tc.id = d.cluster_id
+                    where (d.wechat_uploaded_at is not null or d.toutiao_uploaded_at is not null)
+                      {exclude_sql}
+                      and ({' or '.join(exact_parts)})
+                    order by coalesce(d.toutiao_uploaded_at, d.wechat_uploaded_at, d.created_at) desc, d.id desc
+                    limit 1
+                    """,
+                    tuple(params),
+                )
+                row = cur.fetchone()
+                if row:
+                    return dict(row)
+
+            normalized_targets = {
+                value
+                for value in (
+                    _normalize_topic_text(clean_title),
+                    _normalize_topic_text(clean_draft_title),
+                )
+                if value
+            }
+            if not normalized_targets:
+                return None
+
+            params = []
+            exclude_sql = ""
+            if exclude_id > 0:
+                exclude_sql = "and d.id <> %s"
+                params.append(exclude_id)
+            params.append(max(50, int(lookback_limit or 2000)))
+            cur.execute(
+                f"""
+                select
+                    d.id,
+                    d.cluster_id,
+                    d.title,
+                    d.review_score,
+                    d.wechat_uploaded_at,
+                    d.toutiao_uploaded_at,
+                    d.created_at,
+                    tc.canonical_title,
+                    to_char(d.wechat_uploaded_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as wechat_uploaded_at_text,
+                    to_char(d.toutiao_uploaded_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as toutiao_uploaded_at_text,
+                    to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
+                from article_drafts d
+                join topic_clusters tc on tc.id = d.cluster_id
+                where (d.wechat_uploaded_at is not null or d.toutiao_uploaded_at is not null)
+                  {exclude_sql}
+                order by coalesce(d.toutiao_uploaded_at, d.wechat_uploaded_at, d.created_at) desc, d.id desc
+                limit %s
+                """,
+                tuple(params),
+            )
+            for candidate in cur.fetchall():
+                row_dict = dict(candidate)
+                normalized_existing = {
+                    value
+                    for value in (
+                        _normalize_topic_text(row_dict.get("canonical_title") or ""),
+                        _normalize_topic_text(row_dict.get("title") or ""),
+                    )
+                    if value
+                }
+                if normalized_existing & normalized_targets:
+                    return row_dict
+            return None
+
+
 def delete_drafts_by_ids(settings: Settings, draft_ids: list[int]) -> list[dict]:
     ids = sorted({int(draft_id) for draft_id in draft_ids if int(draft_id) > 0})
     if not ids:

@@ -361,9 +361,10 @@ def update_config(
     dingtalk_secret: str = Form(""),
     dingtalk_timeout_seconds: int = Form(10),
     auto_daily_publish_enabled: str = Form(""),
-    auto_daily_publish_time: str = Form("07:00"),
-    auto_daily_publish_draft_limit: int = Form(10),
-    auto_daily_publish_publish_limit: int = Form(4),
+    auto_daily_publish_time: str = Form("07:00,17:00"),
+    auto_daily_publish_hotspot_limit: int = Form(30),
+    auto_daily_publish_draft_limit: int = Form(5),
+    auto_daily_publish_publish_limit: int = Form(3),
     auto_daily_publish_retry_count: int = Form(2),
     auto_daily_publish_enable_wechat: str = Form(""),
     auto_daily_publish_enable_toutiao: str = Form(""),
@@ -484,9 +485,25 @@ def update_config(
         runtime["notifications"]["dingtalk"]["secret"] = ""
     runtime["notifications"]["dingtalk"]["timeout_seconds"] = max(3, min(int(dingtalk_timeout_seconds), 30))
     runtime.setdefault("automation", {})
+    schedule_times = []
+    for raw_time in re.split(r"[\r\n,，;；]+", auto_daily_publish_time):
+        raw_time = raw_time.strip()
+        if not raw_time:
+            continue
+        try:
+            hour_text, minute_text = raw_time.split(":", 1)
+            normalized_time = f"{max(0, min(int(hour_text), 23)):02d}:{max(0, min(int(minute_text), 59)):02d}"
+        except Exception:
+            normalized_time = "07:00"
+        if normalized_time not in schedule_times:
+            schedule_times.append(normalized_time)
+    if not schedule_times:
+        schedule_times = ["07:00", "17:00"]
     runtime["automation"]["daily_publish"] = {
         "enabled": auto_daily_publish_enabled == "on",
-        "schedule_time": auto_daily_publish_time.strip() or "07:00",
+        "schedule_time": schedule_times[0],
+        "schedule_times": schedule_times,
+        "hotspot_limit": max(1, min(int(auto_daily_publish_hotspot_limit), 100)),
         "draft_limit": max(1, min(int(auto_daily_publish_draft_limit), 30)),
         "publish_limit": max(1, min(int(auto_daily_publish_publish_limit), 10)),
         "retry_count": max(1, min(int(auto_daily_publish_retry_count), 5)),
@@ -521,8 +538,9 @@ def update_config(
             f"钉钉通知：{'已启用' if runtime['notifications']['dingtalk']['enabled'] else '未启用'}",
             f"钉钉超时：{runtime['notifications']['dingtalk']['timeout_seconds']} 秒",
             f"自动任务：{'已开启' if runtime['automation']['daily_publish']['enabled'] else '未开启'}",
-            f"自动执行时间：{runtime['automation']['daily_publish']['schedule_time']}",
-            f"自动抓取成稿：{runtime['automation']['daily_publish']['draft_limit']} 篇",
+            f"自动执行时间：{' / '.join(runtime['automation']['daily_publish'].get('schedule_times') or [runtime['automation']['daily_publish']['schedule_time']])}",
+            f"自动热点候选：{runtime['automation']['daily_publish']['hotspot_limit']} 个",
+            f"自动生成初稿：{runtime['automation']['daily_publish']['draft_limit']} 篇",
             f"自动推送发布：{runtime['automation']['daily_publish']['publish_limit']} 篇",
             f"自动任务重试：{runtime['automation']['daily_publish']['retry_count']} 次",
             f"自动任务渠道：{'公众号' if runtime['automation']['daily_publish']['enable_wechat'] else ''}{' + ' if runtime['automation']['daily_publish']['enable_wechat'] and runtime['automation']['daily_publish']['enable_toutiao'] else ''}{'头条' if runtime['automation']['daily_publish']['enable_toutiao'] else ''}".strip() or '未启用',
@@ -534,7 +552,7 @@ def update_config(
         "info",
         (
             f"自动任务状态已刷新：time={scheduler_state['time']}｜"
-            f"draft_limit={scheduler_state['draft_limit']}｜publish_limit={scheduler_state['publish_limit']}"
+            f"hotspot_limit={scheduler_state['hotspot_limit']}｜draft_limit={scheduler_state['draft_limit']}｜publish_limit={scheduler_state['publish_limit']}"
         ),
     )
     return RedirectResponse(url="/?message=配置已保存", status_code=303)
@@ -589,7 +607,7 @@ def action_auto_daily_publish_run_now():
             "warning",
             (
                 f"{message}：schedule={scheduler_state['time']}｜"
-                f"draft_limit={scheduler_state['draft_limit']}｜publish_limit={scheduler_state['publish_limit']}"
+                f"hotspot_limit={scheduler_state['hotspot_limit']}｜draft_limit={scheduler_state['draft_limit']}｜publish_limit={scheduler_state['publish_limit']}"
             ),
             source="scheduler",
         )
@@ -598,6 +616,7 @@ def action_auto_daily_publish_run_now():
             [
                 "已有一轮自动任务正在执行，本次手动触发已跳过。",
                 f"计划执行时间：{scheduler_state['time']}",
+                f"本次热点候选：{scheduler_state['hotspot_limit']} 个",
                 f"本次生成配置：{scheduler_state['draft_limit']} 篇",
                 f"本次推送配置：{scheduler_state['publish_limit']} 篇",
             ],
@@ -608,7 +627,7 @@ def action_auto_daily_publish_run_now():
         "info",
         (
             f"已手动触发自动任务：schedule={scheduler_state['time']}｜"
-            f"draft_limit={scheduler_state['draft_limit']}｜publish_limit={scheduler_state['publish_limit']}"
+            f"hotspot_limit={scheduler_state['hotspot_limit']}｜draft_limit={scheduler_state['draft_limit']}｜publish_limit={scheduler_state['publish_limit']}"
         ),
         source="scheduler",
     )
@@ -616,6 +635,7 @@ def action_auto_daily_publish_run_now():
         "已手动触发自动任务",
         [
             f"计划执行时间：{scheduler_state['time']}",
+            f"本次热点候选：{scheduler_state['hotspot_limit']} 个",
             f"本次生成：{scheduler_state['draft_limit']} 篇",
             f"本次推送：{scheduler_state['publish_limit']} 篇",
         ],

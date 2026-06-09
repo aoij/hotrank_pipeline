@@ -82,8 +82,10 @@
     "timeout_seconds": 180,
     "retry_count": 3,
     "retry_backoff_seconds": 2.0,
+    "draft_generation_attempts": 3,
     "draft_prompt": "",
-    "auto_polish_draft": true
+    "auto_polish_draft": true,
+    "fallback_models": []
   },
   "draft_output_dir": "T:\\微信公众号文档",
   "wechat_gateway": {
@@ -107,7 +109,17 @@
     "auto_open_login_on_publish": true,
     "username": "",
     "password": "",
-    "auto_password_login": true
+    "auto_password_login": true,
+    "publish_options": {
+      "claim_exclusive": true,
+      "ad_enabled": true,
+      "publish_more_income": false,
+      "collection_name": "这事和你有关",
+      "statement_labels": [
+        "个人观点，仅供参考"
+      ],
+      "disable_auto_rights_protection": true
+    }
   },
   "notifications": {
     "dingtalk": {
@@ -119,17 +131,22 @@
   },
   "automation": {
     "daily_publish": {
-      "enabled": false,
+      "enabled": true,
       "schedule_time": "07:00",
-      "draft_limit": 10,
-      "publish_limit": 4,
+      "hotspot_limit": 30,
+      "draft_limit": 5,
+      "publish_limit": 3,
       "retry_count": 2,
       "enable_wechat": true,
       "enable_toutiao": true,
       "notify_on_scrape": true,
       "notify_on_draft_generated": true,
       "notify_on_publish_finished": true,
-      "preference_keywords": []
+      "preference_keywords": [],
+      "schedule_times": [
+        "07:00",
+        "17:00"
+      ]
     }
   },
   "hotspot_cleanup": {

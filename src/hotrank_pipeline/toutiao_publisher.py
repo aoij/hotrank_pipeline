@@ -124,7 +124,7 @@ def _toutiao_config(settings: Settings) -> dict[str, Any]:
         "auto_password_login": bool(raw.get("auto_password_login", True)),
         "publish_options": {
             "ad_enabled": bool(publish_options.get("ad_enabled", True)),
-            "claim_exclusive": bool(publish_options.get("claim_exclusive", False)),
+            "claim_exclusive": bool(publish_options.get("claim_exclusive", True)),
             "collection_name": (
                 str(publish_options.get("collection_name") or DEFAULT_TOUTIAO_COLLECTION_NAME).strip()
             ),
@@ -1089,7 +1089,13 @@ async def _configure_publish_options(page: Page, config: dict[str, Any], cover_p
 
     selected_collection = ""
     if options.get("collection_name"):
-        selected_collection = await _configure_collection(page, str(options["collection_name"]))
+        try:
+            selected_collection = await _configure_collection(page, str(options["collection_name"]))
+        except Exception as exc:
+            # 头条合集可能处于审核中、下架、不可新增文章或当前账号暂无权限。
+            # 这类情况不应中断整篇文章发布，自动跳过合集即可。
+            print(f"[toutiao] skip collection: {options.get('collection_name')}｜{exc}")
+            selected_collection = ""
 
     selected_statements = await _configure_statement_labels(page, options.get("statement_labels") or [])
 
@@ -2176,3 +2182,71 @@ def publish_recent_drafts_to_toutiao(settings: Settings, limit: int = 10) -> dic
         "skipped": skipped,
         "failed": failed,
     }
+
+
+def _safe_json_loads(value: Any, default: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return default
+    try:
+        return json.loads(value)
+    except Exception:
+        return default
+
+
+async def _fetch_toutiao_article_stats_async(config: dict[str, Any], limit: int) -> dict[str, Any]:
+    context = await _new_context(config, headless=True)
+    page = context.pages[0] if context.pages else await context.new_page()
+    try:
+        await page.goto("https://mp.toutiao.com/profile_v4/content/manage", wait_until="domcontentloaded", timeout=60000)
+        if _is_login_url(page.url):
+            return {"ok": False, "error": "not_login", "url": page.url, "articles": []}
+        payload = await _query_article_list(page, status="all", page_size=max(5, min(int(limit), 100)))
+        outer = (payload or {}).get("data") or {}
+        articles = ((outer.get("data") or {}).get("articles") or []) if isinstance(outer, dict) else []
+        normalized: list[dict[str, Any]] = []
+        for article in articles:
+            copy_info = _safe_json_loads(article.get("copy_info"), {})
+            covers = _safe_json_loads(article.get("pgc_feed_covers"), [])
+            read_count = article.get("go_detail_count_v2")
+            if read_count is None:
+                read_count = article.get("go_detail_count") or article.get("read_count") or 0
+            impression = article.get("impression_count") or 0
+            try:
+                ctr = round(float(read_count or 0) / max(float(impression or 0), 1.0) * 100, 2)
+            except Exception:
+                ctr = 0.0
+            normalized.append(
+                {
+                    "title": article.get("title") or "",
+                    "article_id": article.get("group_id") or article.get("article_id") or article.get("id") or "",
+                    "article_url": article.get("article_url") or "",
+                    "status_desc": article.get("status_desc") or "",
+                    "create_time": _article_time_value(article),
+                    "word_count": copy_info.get("word_count") or article.get("content_word_cnt"),
+                    "image_count": copy_info.get("image_count"),
+                    "cover_count": len(covers) if isinstance(covers, list) else 0,
+                    "impression_count": impression,
+                    "read_count": read_count,
+                    "ctr_percent": ctr,
+                    "digg_count": article.get("digg_count") or 0,
+                    "comment_count": article.get("comment_count") or 0,
+                    "collection": article.get("pgc_collection_title") or "",
+                    "claim_exclusive": str(article.get("claim_exclusive") or ""),
+                    "large_image_url": article.get("large_image_url") or "",
+                }
+            )
+        return {
+            "ok": True,
+            "api_url": payload.get("url"),
+            "count": len(normalized),
+            "articles": normalized,
+        }
+    finally:
+        await _close_context(context)
+
+
+def fetch_toutiao_article_stats(settings: Settings, limit: int = 50) -> dict[str, Any]:
+    config = _toutiao_config(settings)
+    return asyncio.run(_fetch_toutiao_article_stats_async(config, limit=max(5, min(int(limit), 100))))

@@ -1460,7 +1460,7 @@
                 <span class="step-num">定</span>
                 <h3>每日自动抓取与发布</h3>
               </div>
-              <p>每天 {{ scheduler_state.time }} 自动抓热点、生成 {{ scheduler_state.draft_limit }} 篇初稿、挑选 {{ scheduler_state.publish_limit }} 篇高分稿同步推送到公众号和今日头条；抓取开始、初稿生成完成、最终推送完成都会发钉钉。</p>
+              <p>每天 {{ scheduler_state.time }} 自动抓取 {{ scheduler_state.hotspot_limit }} 个热点候选、生成 {{ scheduler_state.draft_limit }} 篇初稿、挑选 {{ scheduler_state.publish_limit }} 篇高分稿发布到已启用渠道；抓取开始、初稿生成完成、最终发布完成都会发钉钉。</p>
               <div class="form-tip" style="margin: 10px 0 12px 0;">
                 调度：{{ '已启用' if scheduler_state.enabled else '未启用' }}｜线程：{{ '运行中' if scheduler_state.running else '待命' }}｜重试：{{ scheduler_state.retry_count }} 次<br>
                 渠道：{{ '公众号' if scheduler_state.enable_wechat else '' }}{% if scheduler_state.enable_wechat and scheduler_state.enable_toutiao %} + {% endif %}{{ '头条' if scheduler_state.enable_toutiao else '' }}{% if not scheduler_state.enable_wechat and not scheduler_state.enable_toutiao %}未启用{% endif %}<br>
@@ -1485,7 +1485,7 @@
                     <div class="draft-title">自动任务｜{{ item.run_at }}</div>
                     <span class="score-pill {% if item.status == 'success' %}article-score{% else %}unscored{% endif %}">{{ item.status }}</span>
                   </div>
-                  <div class="draft-meta">draft={{ item.draft_limit or '-' }}｜publish={{ item.publish_limit or '-' }}｜wechat={{ item.wechat_published_count if item.wechat_published_count is defined else '-' }}｜toutiao={{ item.toutiao_published_count if item.toutiao_published_count is defined else '-' }}</div>
+                  <div class="draft-meta">time={{ item.schedule_time or '-' }}｜draft={{ item.draft_limit or '-' }}｜publish={{ item.publish_limit or '-' }}｜wechat={{ item.wechat_published_count if item.wechat_published_count is defined else '-' }}｜toutiao={{ item.toutiao_published_count if item.toutiao_published_count is defined else '-' }}</div>
                   <div class="draft-summary">{{ item.message }}</div>
                   {% if item.brief_path %}
                   <div class="draft-meta" style="margin-top:6px;">
@@ -1689,7 +1689,7 @@
               <input type="number" min="1" max="12" name="image_max_per_draft" value="{{ runtime.images.max_per_draft if runtime.images else 6 }}">
 
               <label>单个来源最多取图数</label>
-              <input type="number" min="1" max="8" name="image_max_per_source" value="{{ runtime.images.max_per_source if runtime.images else 4 }}">
+              <input type="number" min="1" max="8" name="image_max_per_source" value="{{ runtime.images.max_per_source if runtime.images else 3 }}">
 
               <label>
                 <input type="checkbox" name="image_prefer_ai_generated" {% if runtime.images is not defined or runtime.images.prefer_ai_generated %}checked{% endif %} style="width:auto; margin-right:8px;">
@@ -1720,7 +1720,7 @@
               <input name="image_generation_size" value="{{ runtime.images.generation.size if runtime.images and runtime.images.generation and runtime.images.generation.size else '1024x1024' }}">
 
               <label>生图并发数</label>
-              <input type="number" min="1" max="12" name="image_generation_concurrency" value="{{ runtime.images.generation.concurrency if runtime.images and runtime.images.generation and runtime.images.generation.concurrency else 4 }}">
+              <input type="number" min="1" max="12" name="image_generation_concurrency" value="{{ runtime.images.generation.concurrency if runtime.images and runtime.images.generation and runtime.images.generation.concurrency else 3 }}">
               <div class="form-tip">生图模型较慢时建议 2-4；如果生图服务有并发限制，可调低。</div>
 
               <label>单张生图超时（秒）</label>
@@ -1745,7 +1745,7 @@
               <input name="wechat_gateway_token" placeholder="当前已配置则留空即可">
 
               <label>推送公众号单篇最多上传图片数</label>
-              <input type="number" min="1" max="8" name="wechat_gateway_max_images" value="{{ runtime.wechat_gateway.max_images if runtime.wechat_gateway is defined and runtime.wechat_gateway.max_images else 4 }}">
+              <input type="number" min="1" max="8" name="wechat_gateway_max_images" value="{{ runtime.wechat_gateway.max_images if runtime.wechat_gateway is defined and runtime.wechat_gateway.max_images else 3 }}">
               <div class="form-tip">微信草稿接口对标题、摘要、图片上传有约束；系统默认保留完整标题，仅超过微信 64 字限制时才截断，并上传封面与正文图片。</div>
 
               <hr class="section-divider">
@@ -1835,7 +1835,7 @@
               <input name="dingtalk_secret" value="" placeholder="当前：已配置则留空即可">
 
               <label>钉钉超时（秒）</label>
-              <input type="number" min="3" max="30" name="dingtalk_timeout_seconds" value="{{ runtime.notifications.dingtalk.timeout_seconds if runtime.notifications is defined and runtime.notifications.dingtalk is defined and runtime.notifications.dingtalk.timeout_seconds else 10 }}">
+              <input type="number" min="3" max="30" name="dingtalk_timeout_seconds" value="{{ runtime.notifications.dingtalk.timeout_seconds if runtime.notifications is defined and runtime.notifications.dingtalk is defined and runtime.notifications.dingtalk.timeout_seconds else 5 }}">
               <div class="form-tip">保存后、跑流程后、重新生成后都会自动发一条进度通知；Webhook / Secret 留空则保留当前值。</div>
 
               <hr class="section-divider">
@@ -1847,13 +1847,16 @@
               </label>
 
               <label>每天执行时间</label>
-              <input name="auto_daily_publish_time" value="{{ runtime.automation.daily_publish.schedule_time if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.schedule_time else '07:00' }}" placeholder="07:00">
+              <input name="auto_daily_publish_time" value="{{ (runtime.automation.daily_publish.schedule_times | join(',')) if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.schedule_times is defined and runtime.automation.daily_publish.schedule_times else (runtime.automation.daily_publish.schedule_time if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.schedule_time else '07:00,17:00') }}" placeholder="07:00,17:00">
+
+              <label>自动抓取热点数量</label>
+              <input type="number" min="1" max="100" name="auto_daily_publish_hotspot_limit" value="{{ runtime.automation.daily_publish.hotspot_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.hotspot_limit else 30 }}">
 
               <label>自动生成初稿数量</label>
-              <input type="number" min="1" max="30" name="auto_daily_publish_draft_limit" value="{{ runtime.automation.daily_publish.draft_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.draft_limit else 10 }}">
+              <input type="number" min="1" max="30" name="auto_daily_publish_draft_limit" value="{{ runtime.automation.daily_publish.draft_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.draft_limit else 5 }}">
 
               <label>自动择优发布数量</label>
-              <input type="number" min="1" max="10" name="auto_daily_publish_publish_limit" value="{{ runtime.automation.daily_publish.publish_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.publish_limit else 4 }}">
+              <input type="number" min="1" max="10" name="auto_daily_publish_publish_limit" value="{{ runtime.automation.daily_publish.publish_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.publish_limit else 3 }}">
 
               <label>发布失败重试次数</label>
               <input type="number" min="1" max="5" name="auto_daily_publish_retry_count" value="{{ runtime.automation.daily_publish.retry_count if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.retry_count else 2 }}">
@@ -1885,7 +1888,7 @@
                 <input type="checkbox" name="auto_daily_publish_notify_on_publish_finished" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.notify_on_publish_finished is not defined or runtime.automation.daily_publish.notify_on_publish_finished %}checked{% endif %} style="width:auto; margin-right:8px;">
                 最终发布完成时发钉钉
               </label>
-              <div class="form-tip">默认每天早上 7 点：先抓热点，再生成 10 篇初稿，按评分高且时间新的顺序挑 4 篇。你现在可以再限定偏好关键词、控制只发公众号/只发头条，并为失败发布开启自动重试。</div>
+              <div class="form-tip">默认每天早上 7 点和下午 5 点各跑一次：抓取 30 个热点，生成 5 篇初稿，按评分从高到低挑 3 篇；已发布过的热点不会重复发布。你现在可以再限定偏好关键词、控制只发公众号/只发头条，并为失败发布开启自动重试。</div>
 
               <div style="margin-top: 16px;">
                 <button type="submit" class="full-button">保存当前配置</button>

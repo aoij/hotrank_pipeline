@@ -16,7 +16,7 @@ from .services import (
     run_scrape,
 )
 from .scheduler import run_daily_publish_once
-from .toutiao_publisher import login_toutiao, publish_recent_drafts_to_toutiao
+from .toutiao_publisher import fetch_toutiao_article_stats, login_toutiao, publish_recent_drafts_to_toutiao
 from .wechat_publisher import publish_recent_drafts_to_wechat
 
 
@@ -45,7 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
     toutiao_login_parser.add_argument("--pretty", action="store_true", help="输出缩进 JSON")
     toutiao_publish_parser = subparsers.add_parser("publish-toutiao-drafts", help="把高分初稿直接发布到今日头条")
     toutiao_publish_parser.add_argument("--limit", type=int, default=10, help="最多发布多少篇")
+    toutiao_stats_parser = subparsers.add_parser("toutiao-stats", help="读取今日头条已发布文章阅读/展现数据")
+    toutiao_stats_parser.add_argument("--limit", type=int, default=50, help="最多读取多少篇")
     auto_publish_parser = subparsers.add_parser("run-daily-auto-publish", help="执行每日自动抓取、成稿、评分与双端发布")
+    auto_publish_parser.add_argument("--hotspot-limit", type=int, default=None, help="本轮最多挑多少个热点进入候选池；默认读取页面配置")
     auto_publish_parser.add_argument("--draft-limit", type=int, default=None, help="先生成多少篇初稿；默认读取页面配置")
     auto_publish_parser.add_argument("--publish-limit", type=int, default=None, help="最终择优发布多少篇；默认读取页面配置")
     auto_publish_parser.add_argument("--force", action="store_true", help="忽略今日已成功记录，强制执行一次")
@@ -118,11 +121,16 @@ def main() -> int:
         print(json.dumps(publish_recent_drafts_to_toutiao(settings, limit=args.limit), ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "toutiao-stats":
+        print(json.dumps(fetch_toutiao_article_stats(settings, limit=args.limit), ensure_ascii=False, indent=2))
+        return 0
+
     if args.command == "run-daily-auto-publish":
         result = run_daily_publish_once(
             settings,
             trigger=args.trigger,
             force=args.force,
+            hotspot_limit=args.hotspot_limit,
             draft_limit=args.draft_limit,
             publish_limit=args.publish_limit,
         )
