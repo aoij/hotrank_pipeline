@@ -386,6 +386,12 @@ def _disable_env_proxy_for_llm(llm_config: dict) -> bool:
     SSL EOF during TLS handshake. Default to direct connection for LLM calls unless
     config explicitly sets disable_env_proxy=false.
     """
+    base_url = str((llm_config or {}).get("base_url") or "").lower()
+    model = str((llm_config or {}).get("model") or "").lower()
+    # Xiaomi Mimo's China-hosted endpoint is sensitive to the user's global proxy.
+    # Keep it on a direct requests.Session even if the runtime config is changed later.
+    if "xiaomimimo.com" in base_url or "token-plan-cn" in base_url or model.startswith("mimo-"):
+        return True
     if "disable_env_proxy" in (llm_config or {}):
         return bool(llm_config.get("disable_env_proxy"))
     return True
