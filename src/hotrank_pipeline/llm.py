@@ -366,7 +366,17 @@ def _post_json_with_retry(
                     break
                 time.sleep(backoff_seconds * attempt)
             except requests.HTTPError as exc:
-                last_error = exc
+                if exc.response is not None:
+                    body = (exc.response.text or "").strip()
+                    if body:
+                        last_error = requests.HTTPError(
+                            f"{exc}｜response={body[:500]}",
+                            response=exc.response,
+                        )
+                    else:
+                        last_error = exc
+                else:
+                    last_error = exc
                 status_code = exc.response.status_code if exc.response is not None else None
                 if status_code not in (429, 500, 502, 503, 504) or attempt >= retry_count:
                     break
@@ -397,6 +407,12 @@ def _disable_env_proxy_for_llm(llm_config: dict) -> bool:
     return True
 
 
+def _is_mimo_model(llm_config: dict) -> bool:
+    base_url = str((llm_config or {}).get("base_url") or "").lower()
+    model = str((llm_config or {}).get("model") or "").lower()
+    return "xiaomimimo.com" in base_url or "token-plan-cn" in base_url or model.startswith("mimo-")
+
+
 def _apply_reasoning_options(payload: dict, llm_config: dict) -> None:
     effort = (
         llm_config.get("reasoning_effort")
@@ -412,7 +428,13 @@ def _apply_reasoning_options(payload: dict, llm_config: dict) -> None:
             "中": "medium",
             "低": "low",
         }
-        payload["reasoning_effort"] = aliases.get(value, value)
+        normalized = aliases.get(value, value)
+        # Mimo's OpenAI-compatible endpoint currently validates reasoning_effort
+        # strictly and rejects xhigh with HTTP 400. Keep the user's "highest"
+        # intent, but map it to the highest value accepted by Mimo.
+        if _is_mimo_model(llm_config) and normalized not in {"low", "medium", "high"}:
+            normalized = "high"
+        payload["reasoning_effort"] = normalized
     reasoning = llm_config.get("reasoning_options")
     if isinstance(reasoning, dict) and reasoning:
         payload["reasoning"] = reasoning
@@ -2321,7 +2343,10 @@ def review_wechat_draft(
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.2,
-        "max_tokens": 1200,
+        # Mimo emits a large reasoning_content before the visible JSON. 1200
+        # tokens is sometimes consumed by reasoning alone, leaving no parsable
+        # content. Give review calls a little more room so score JSON is stable.
+        "max_tokens": 2200 if _is_mimo_model(llm_config) else 1200,
     }
     _apply_reasoning_options(payload, llm_config)
 
@@ -2339,8 +2364,25 @@ def review_wechat_draft(
     )
     data = response.json()
     message = data["choices"][0]["message"]
-    raw = _chat_message_text(message)
-    score = _parse_review_score(raw)
+    raw_candidates = [
+        str(message.get("content") or "").strip(),
+        str(message.get("reasoning_content") or "").strip(),
+    ]
+    raw_candidates.append("\n".join(item for item in raw_candidates if item))
+    raw = ""
+    score: float | None = None
+    for candidate in raw_candidates:
+        if not candidate:
+            continue
+        try:
+            score = _parse_review_score(candidate)
+            raw = candidate
+            break
+        except ValueError:
+            continue
+    if score is None:
+        raw = _chat_message_text(message)
+        score = _parse_review_score(raw)
     summary = _parse_review_summary(raw)
     return score, summary, prompt[:1200]
 
