@@ -348,7 +348,7 @@ def _top_scored_drafts_for_publish(
     preferred_only: bool = False,
     enable_wechat: bool = True,
     enable_toutiao: bool = True,
-    min_review_score: float = 8.6,
+    min_review_score: float = 8.2,
 ) -> list[dict]:
     candidates = fetch_recent_drafts(settings, limit=max(limit * 8, recent_scan_limit))
     selected: list[dict] = []
@@ -1598,13 +1598,13 @@ def run_daily_auto_publish(
 ) -> dict:
     config = _automation_publish_config(settings)
     current_schedule_time = str(schedule_time or config.get("schedule_time") or "07:00").strip() or "07:00"
-    final_draft_limit = max(1, int(draft_limit or config.get("draft_limit") or 5))
+    final_draft_limit = max(1, int(draft_limit or config.get("draft_limit") or 10))
     final_hotspot_limit = max(
         final_draft_limit,
         int(hotspot_limit or config.get("hotspot_limit") or 30),
     )
     final_publish_limit = max(1, int(publish_limit or config.get("publish_limit") or 3))
-    min_publish_score = max(0.0, min(float(config.get("min_publish_score") or 8.6), 10.0))
+    min_publish_score = max(0.0, min(float(config.get("min_publish_score") or 8.2), 10.0))
     enable_wechat = bool(config.get("enable_wechat", True))
     enable_toutiao = bool(config.get("enable_toutiao", True))
     retry_count = max(1, int(config.get("retry_count") or 2))

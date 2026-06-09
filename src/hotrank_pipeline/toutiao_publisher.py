@@ -1006,6 +1006,79 @@ async def _set_checkbox_state(page: Page, label_text: str, desired: bool, *, req
     return current
 
 
+async def _ensure_toutiao_first_publish(page: Page, desired: bool, *, required: bool = False) -> bool:
+    """Set Toutiao's "首发/头条首发" switch.
+
+    The publish page has changed this control several times.  Sometimes it is a
+    normal label, sometimes the clickable node is a parent/sibling switch around
+    the text.  Keep the generic checkbox path first, then fall back to a small
+    DOM search that clicks the nearest interactive container and verifies state.
+    """
+    labels = ("头条首发", "首发", "原创首发")
+    for label in labels:
+        try:
+            applied = await _set_checkbox_state(page, label, desired, required=False)
+            if applied == desired:
+                return applied
+        except Exception:
+            continue
+
+    result = await page.evaluate(
+        """async ({ labels, desired }) => {
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const textOf = (el) => (el?.innerText || el?.textContent || '').trim();
+            const isChecked = (el) => {
+                if (!el) return false;
+                const nodes = [el, ...Array.from(el.querySelectorAll('*'))];
+                return nodes.some((node) => {
+                    const cls = typeof node.className === 'string' ? node.className : '';
+                    if (cls.includes('checked') || cls.includes('active') || cls.includes('is-checked')) return true;
+                    if (node.getAttribute?.('aria-checked') === 'true') return true;
+                    if (node.getAttribute?.('aria-selected') === 'true') return true;
+                    if (node.tagName === 'INPUT' && node.checked) return true;
+                    return false;
+                });
+            };
+            const all = Array.from(document.querySelectorAll('label, span, div, button'));
+            const textNode = all.find((el) => labels.some((label) => textOf(el).includes(label)));
+            if (!textNode) return { found: false, checked: false, text: '' };
+            const candidates = [
+                textNode.closest('label'),
+                textNode.closest('[role="checkbox"]'),
+                textNode.closest('[aria-checked]'),
+                textNode.closest('.byte-checkbox, .semi-checkbox, .arco-checkbox, .switch, .byte-switch, .semi-switch, .arco-switch'),
+                textNode.parentElement,
+                textNode.parentElement?.parentElement,
+            ].filter(Boolean);
+            const unique = Array.from(new Set(candidates));
+            let checked = unique.some(isChecked);
+            if (checked !== desired) {
+                const clickable = unique.find((el) => {
+                    const cls = typeof el.className === 'string' ? el.className : '';
+                    return (
+                        el.tagName === 'LABEL' ||
+                        el.tagName === 'BUTTON' ||
+                        el.getAttribute?.('role') === 'checkbox' ||
+                        el.getAttribute?.('aria-checked') != null ||
+                        /checkbox|switch|radio|option|item|wrap|container/.test(cls)
+                    );
+                }) || textNode;
+                clickable.scrollIntoView({ block: 'center', inline: 'center' });
+                clickable.click();
+                await sleep(800);
+                checked = unique.some(isChecked);
+            }
+            return { found: true, checked, text: textOf(textNode).slice(0, 80) };
+        }""",
+        {"labels": list(labels), "desired": bool(desired)},
+    )
+    if result.get("found") and result.get("checked") == bool(desired):
+        return bool(result.get("checked"))
+    if required:
+        raise RuntimeError(f"头条首发按钮设置失败：desired={desired} result={result}")
+    return bool(result.get("checked"))
+
+
 async def _configure_collection(page: Page, collection_name: str) -> str:
     collection_name = (collection_name or "").strip()
     if not collection_name:
@@ -1084,7 +1157,11 @@ async def _configure_publish_options(page: Page, config: dict[str, Any], cover_p
         await _dismiss_masks(page)
 
     await _ensure_radio_selected(page, "投放广告赚收益" if options.get("ad_enabled", True) else "不投放广告")
-    await _set_checkbox_state(page, "头条首发", bool(options.get("claim_exclusive", False)))
+    claim_exclusive_checked = await _ensure_toutiao_first_publish(
+        page,
+        bool(options.get("claim_exclusive", False)),
+        required=bool(options.get("claim_exclusive", False)),
+    )
     await _set_checkbox_state(page, "发布得更多收益", bool(options.get("publish_more_income", False)))
 
     selected_collection = ""
@@ -1114,6 +1191,7 @@ async def _configure_publish_options(page: Page, config: dict[str, Any], cover_p
         "cover_paths": [str(path) for path in chosen_cover_paths],
         "ad_enabled": bool(options.get("ad_enabled", True)),
         "claim_exclusive": bool(options.get("claim_exclusive", False)),
+        "claim_exclusive_checked": claim_exclusive_checked,
         "collection_name": selected_collection,
         "statement_labels": selected_statements,
         "publish_more_income": bool(options.get("publish_more_income", False)),
@@ -1593,6 +1671,35 @@ async def _collect_publish_page_hints(page: Page) -> dict[str, Any]:
                 if (!label) return null;
                 return label.className.includes('checked') || !!label.querySelector('input:checked');
             };
+            const findFlexibleChecked = (texts) => {
+                const textOf = (el) => (el?.innerText || el?.textContent || '').trim();
+                const textNode = Array.from(document.querySelectorAll('label, span, div, button')).find(
+                    (el) => texts.some((text) => textOf(el).includes(text))
+                );
+                if (!textNode) return null;
+                const candidates = [
+                    textNode.closest('label'),
+                    textNode.closest('[role="checkbox"]'),
+                    textNode.closest('[aria-checked]'),
+                    textNode.closest('.byte-checkbox, .semi-checkbox, .arco-checkbox, .switch, .byte-switch, .semi-switch, .arco-switch'),
+                    textNode.parentElement,
+                    textNode.parentElement?.parentElement,
+                ].filter(Boolean);
+                return candidates.some((el) => {
+                    const nodes = [el, ...Array.from(el.querySelectorAll('*'))];
+                    return nodes.some((node) => {
+                        const cls = typeof node.className === 'string' ? node.className : '';
+                        return (
+                            cls.includes('checked') ||
+                            cls.includes('active') ||
+                            cls.includes('is-checked') ||
+                            node.getAttribute?.('aria-checked') === 'true' ||
+                            node.getAttribute?.('aria-selected') === 'true' ||
+                            (node.tagName === 'INPUT' && node.checked)
+                        );
+                    });
+                });
+            };
             const titleBox = document.querySelector("textarea[placeholder*='标题'], textarea[placeholder*='文章标题']");
             const titleTip = document.querySelector('.title-tip');
             const bodyText = document.body.innerText || '';
@@ -1626,7 +1733,7 @@ async def _collect_publish_page_hints(page: Page) -> dict[str, Any]:
                 no_ad_checked: findChecked('不投放广告'),
                 ad_checked: findChecked('投放广告赚收益'),
                 wtt_checked: findChecked('发布得更多收益'),
-                claim_exclusive_checked: findChecked('头条首发'),
+                claim_exclusive_checked: findFlexibleChecked(['头条首发', '原创首发', '首发']),
                 collection_text: collectionBtn ? collectionBtn.innerText.trim() : '',
                 selected_statements: selectedStatements,
                 body_hints: lines,

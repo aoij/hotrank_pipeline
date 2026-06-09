@@ -144,7 +144,7 @@
       "enabled": true,
       "schedule_time": "07:00",
       "hotspot_limit": 30,
-      "draft_limit": 5,
+      "draft_limit": 10,
       "publish_limit": 3,
       "retry_count": 2,
       "enable_wechat": true,
@@ -157,7 +157,7 @@
         "07:00",
         "17:00"
       ],
-      "min_publish_score": 8.6
+      "min_publish_score": 8.2
     }
   },
   "hotspot_cleanup": {
