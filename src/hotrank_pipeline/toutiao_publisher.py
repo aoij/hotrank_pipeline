@@ -33,6 +33,29 @@ DEFAULT_TOUTIAO_COLLECTION_NAME = "这事和你有关"
 DEFAULT_TOUTIAO_STATEMENT_LABELS = ["个人观点，仅供参考"]
 DEFAULT_PUBLISH_LOCK_WAIT_SECONDS = 900
 DEFAULT_PUBLISH_LOCK_STALE_SECONDS = 1800
+PROFILE_IGNORE_NAMES = {
+    "SingletonLock",
+    "SingletonSocket",
+    "SingletonCookie",
+    "lockfile",
+    "DevToolsActivePort",
+    "LOCK",
+}
+PROFILE_IGNORE_DIR_NAMES = {
+    "Crashpad",
+    "Code Cache",
+    "GPUCache",
+    "GrShaderCache",
+    "ShaderCache",
+    "DawnCache",
+    "component_crx_cache",
+}
+PROFILE_IGNORE_SUFFIXES = {
+    ".lock",
+    ".tmp",
+    ".pma",
+    ".journal",
+}
 RECOVERABLE_AFTER_PUBLISH_STAGES = {
     "click_publish",
     "wait_publish_response",
@@ -308,6 +331,54 @@ def _is_login_url(url: str) -> bool:
     return "auth/page/login" in lowered or "/login" in lowered
 
 
+def _should_ignore_profile_entry(path: Path) -> bool:
+    name = path.name
+    if name in PROFILE_IGNORE_NAMES or name.startswith("Singleton"):
+        return True
+    if path.is_dir() and name in PROFILE_IGNORE_DIR_NAMES:
+        return True
+    if path.suffix.lower() in PROFILE_IGNORE_SUFFIXES:
+        return True
+    return False
+
+
+def _copy_profile_tree_tolerant(src: Path, dst: Path) -> dict[str, int]:
+    copied = 0
+    skipped = 0
+    errors = 0
+    dst.mkdir(parents=True, exist_ok=True)
+    if not src.exists():
+        return {"copied": copied, "skipped": skipped, "errors": errors}
+
+    for item in src.rglob("*"):
+        try:
+            relative = item.relative_to(src)
+        except Exception:
+            skipped += 1
+            continue
+        target = dst / relative
+        try:
+            if _should_ignore_profile_entry(item):
+                skipped += 1
+                continue
+            if item.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, target)
+            copied += 1
+        except (PermissionError, FileNotFoundError, OSError):
+            errors += 1
+            continue
+    return {"copied": copied, "skipped": skipped, "errors": errors}
+
+
+def _build_temp_profile_dir(profile_dir: Path) -> Path:
+    return Path(gettempdir()) / "hotrank_toutiao_profiles" / (
+        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{abs(hash(str(profile_dir))) % 100000}"
+    )
+
+
 async def _new_context(config: dict[str, Any], *, headless: bool | None = None) -> BrowserContext:
     from playwright.async_api import async_playwright
 
@@ -316,45 +387,60 @@ async def _new_context(config: dict[str, Any], *, headless: bool | None = None) 
     launch_headless = config["headless"] if headless is None else headless
     launch_profile_dir = profile_dir
     temp_profile_dir: Path | None = None
+    used_fresh_profile = False
+    profile_copy_summary: dict[str, Any] = {"copied": 0, "skipped": 0, "errors": 0}
 
     if launch_headless:
-        temp_profile_dir = Path(gettempdir()) / "hotrank_toutiao_profiles" / (
-            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{abs(hash(str(profile_dir))) % 100000}"
-        )
-        ignore_names = {
-            "SingletonLock",
-            "SingletonSocket",
-            "SingletonCookie",
-            "lockfile",
-            "DevToolsActivePort",
-        }
-
-        def ignore_copy(_src: str, names: list[str]) -> list[str]:
-            return [name for name in names if name in ignore_names or name.startswith("Singleton")]
-
+        temp_profile_dir = _build_temp_profile_dir(profile_dir)
         if temp_profile_dir.exists():
             shutil.rmtree(temp_profile_dir, ignore_errors=True)
-        if profile_dir.exists():
-            shutil.copytree(profile_dir, temp_profile_dir, ignore=ignore_copy, dirs_exist_ok=True)
-        else:
-            temp_profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_copy_summary = _copy_profile_tree_tolerant(profile_dir, temp_profile_dir)
         launch_profile_dir = temp_profile_dir
 
     playwright = await async_playwright().start()
-    context = await playwright.chromium.launch_persistent_context(
-        user_data_dir=str(launch_profile_dir),
-        channel=config["channel"],
-        headless=launch_headless,
-        viewport={"width": 1440, "height": 1200},
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-first-run",
-            "--disable-default-apps",
-        ],
-    )
+    try:
+        context = await playwright.chromium.launch_persistent_context(
+            user_data_dir=str(launch_profile_dir),
+            channel=config["channel"],
+            headless=launch_headless,
+            viewport={"width": 1440, "height": 1200},
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--disable-default-apps",
+            ],
+        )
+    except Exception as exc:
+        if not launch_headless:
+            await playwright.stop()
+            raise
+        fallback_dir = _build_temp_profile_dir(profile_dir)
+        if fallback_dir.exists():
+            shutil.rmtree(fallback_dir, ignore_errors=True)
+        fallback_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            context = await playwright.chromium.launch_persistent_context(
+                user_data_dir=str(fallback_dir),
+                channel=config["channel"],
+                headless=launch_headless,
+                viewport={"width": 1440, "height": 1200},
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-first-run",
+                    "--disable-default-apps",
+                ],
+            )
+            temp_profile_dir = fallback_dir
+            launch_profile_dir = fallback_dir
+            used_fresh_profile = True
+        except Exception:
+            await playwright.stop()
+            raise exc
     setattr(context, "_hotrank_playwright", playwright)
     setattr(context, "_hotrank_temp_profile_dir", str(temp_profile_dir) if temp_profile_dir else "")
     setattr(context, "_hotrank_profile_dir", str(profile_dir))
+    setattr(context, "_hotrank_used_fresh_profile", used_fresh_profile)
+    setattr(context, "_hotrank_profile_copy_summary", profile_copy_summary)
     try:
         await context.grant_permissions(["clipboard-read", "clipboard-write"], origin="https://mp.toutiao.com")
     except Exception:
@@ -374,20 +460,8 @@ async def _close_context(context: BrowserContext | None) -> None:
         if temp_profile_dir and profile_dir:
             temp_dir = Path(temp_profile_dir)
             target_dir = Path(profile_dir)
-            ignore_names = {
-                "SingletonLock",
-                "SingletonSocket",
-                "SingletonCookie",
-                "lockfile",
-                "DevToolsActivePort",
-            }
-
-            def ignore_copy(_src: str, names: list[str]) -> list[str]:
-                return [name for name in names if name in ignore_names or name.startswith("Singleton")]
-
             try:
-                target_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(temp_dir, target_dir, ignore=ignore_copy, dirs_exist_ok=True)
+                _copy_profile_tree_tolerant(temp_dir, target_dir)
             except Exception:
                 pass
         if playwright:
@@ -2154,6 +2228,8 @@ async def _publish_draft_to_toutiao_core(
             "statement_labels": publish_options_result["statement_labels"],
             "publish_more_income": publish_options_result["publish_more_income"],
             "browser_profile_dir": config["browser_profile_dir"],
+            "used_fresh_profile": bool(getattr(context, "_hotrank_used_fresh_profile", False)),
+            "profile_copy_summary": getattr(context, "_hotrank_profile_copy_summary", {}),
             "already_uploaded": False,
         }
     except Exception as exc:
@@ -2175,7 +2251,11 @@ async def _publish_draft_to_toutiao_core(
         screenshot = await _capture_debug_screenshot(page, config, f"publish_draft_{draft_id}_error")
         if isinstance(exc, ToutiaoPublishError):
             raise exc.with_screenshot(screenshot)
-        raise RuntimeError(f"{exc}｜截图：{screenshot}") from exc
+        profile_mode = "fresh-profile" if context and bool(getattr(context, "_hotrank_used_fresh_profile", False)) else "cloned-profile"
+        copy_summary = getattr(context, "_hotrank_profile_copy_summary", {}) if context else {}
+        raise RuntimeError(
+            f"{exc}｜profile_mode={profile_mode}｜profile_copy={copy_summary}｜截图：{screenshot}"
+        ) from exc
     finally:
         await _close_context(context)
 
