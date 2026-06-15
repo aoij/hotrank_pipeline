@@ -4,7 +4,7 @@ import copy
 import re
 import time
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable
 from urllib.parse import urlparse
 
@@ -15,6 +15,7 @@ from .db import (
     cleanup_old_hotspots,
     count_recent_clusters,
     delete_old_drafts,
+    ensure_channel_columns,
     find_existing_draft_for_topic,
     find_published_draft_for_topic,
     fetch_cluster_sources_for_generation,
@@ -23,6 +24,7 @@ from .db import (
     fetch_recent_clusters,
     fetch_recent_drafts,
     fetch_stats,
+    fetch_untoutiao_reviewed_drafts,
     fetch_unreviewed_drafts,
     fetch_unfetched_cluster_items,
     init_db,
@@ -32,21 +34,29 @@ from .db import (
     persist_scrape_result,
     persist_draft_record,
     update_draft_review,
+    update_draft_toutiao_review,
 )
 from .content_filters import is_blocked_source_image_url, is_newslike_text
 from .fetchers import fetch_article
 from .llm import (
+    _should_prefer_real_event_images,
     archive_draft,
+    choose_toutiao_title_candidate,
+    classify_toutiao_topic,
     generate_wechat_draft,
+    polish_wechat_draft_with_latest_anti_ai_prompt,
     polish_wechat_draft_after_self_review,
+    review_toutiao_draft,
     review_wechat_draft,
 )
 from .multi_source import scrape_configured_sources
 from .notifications import send_dingtalk_progress
 from .search_sources import search_topic_sources
 from .scheduler_history import record_scheduler_history
+from .toutiao_growth import save_toutiao_growth_snapshot
 from .toutiao_publisher import ToutiaoPublishError, publish_draft_to_toutiao
 from .tophub import scrape_tophub_news
+from .wechat_quality import evaluate_wechat_publish_quality
 from .wechat_publisher import publish_draft_to_wechat
 
 
@@ -76,8 +86,61 @@ def _automation_publish_config(settings: Settings) -> dict:
     return _automation_config(settings).get("daily_publish") or {}
 
 
+DEFAULT_TOUTIAO_TOPIC_WHITELIST = ["娱乐争议", "家庭教育", "职场消费", "安全风险", "普通人利益"]
+
+
 def _now_shanghai_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _parse_hhmm_today(value: str | None) -> datetime | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        hour_text, minute_text = raw.split(":", 1)
+        hour = max(0, min(int(hour_text), 23))
+        minute = max(0, min(int(minute_text), 59))
+        now = datetime.now()
+        return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    except Exception:
+        return None
+
+
+def _wait_until_publish_time(
+    schedule_time: str,
+    lead_minutes: int,
+    progress_cb: ProgressCallback | None = None,
+) -> dict:
+    """When Windows Task starts early, wait after draft generation until publish time."""
+
+    lead = max(0, min(int(lead_minutes or 0), 180))
+    target = _parse_hhmm_today(schedule_time)
+    if target is None or lead <= 0:
+        return {"waited": False, "wait_seconds": 0, "target_time": schedule_time, "reason": "disabled"}
+    now = datetime.now()
+    # 只在提前窗口内等待；如果任务补跑太晚，不再等到明天。
+    if now >= target:
+        return {"waited": False, "wait_seconds": 0, "target_time": target.strftime("%H:%M"), "reason": "already_due"}
+    early_window_start = target - timedelta(minutes=lead + 5)
+    if now < early_window_start:
+        return {"waited": False, "wait_seconds": 0, "target_time": target.strftime("%H:%M"), "reason": "too_early"}
+
+    wait_seconds = max(0, int((target - now).total_seconds()))
+    if wait_seconds <= 0:
+        return {"waited": False, "wait_seconds": 0, "target_time": target.strftime("%H:%M"), "reason": "already_due"}
+    _emit(
+        progress_cb,
+        "info",
+        f"初稿已提前准备完成，等待到正式发文时间 {target.strftime('%H:%M')} 再发布，预计等待 {wait_seconds // 60} 分 {wait_seconds % 60} 秒",
+    )
+    deadline = time.time() + wait_seconds
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(remaining, 30))
+    return {"waited": True, "wait_seconds": wait_seconds, "target_time": target.strftime("%H:%M"), "reason": "waited_until_publish_time"}
 
 
 def _score_to_float(value) -> float | None:
@@ -108,9 +171,17 @@ def _toutiao_distribution_appeal(draft: dict) -> float:
     # 标题里有具体名词/数字/专有词，推荐流卡片更容易让人判断是否要点。
     if re.search(r"[A-Za-z0-9]{2,}|[\u4e00-\u9fff]{2,}(?:排名|包场|遇袭|高考|面试|工资|电梯|手机|作文|电影|综艺|宠物)", title):
         score += 0.25
+    if re.search(r"(吵|急|怕|坑|账|哭|尴尬|扎心|翻车|后门|不安|麻烦|冲突|细节|反常|卡住)", title):
+        score += 0.25
+    if re.search(r"(高考|家长|孩子|工资|职场|外卖|电梯|微信|隐私|诈骗|明星|电影|票房|恋爱|家庭|宠物)", title):
+        score += 0.15
     # 泛标题会让用户不知道点进去看什么，直接降权。
     if re.search(r"^(你可能也刷到了|今天朋友圈刷屏|朋友圈刷屏|这事|这件事|别急着下结论|先别急着下判断)", title):
         score -= 0.8
+    if re.search(r"^从.{2,12}到.{2,12}$", title):
+        score -= 0.45
+    if re.search(r"(最该看懂的是具体影响|朋友圈到底在吵啥|很多人点开看的是自己|我突然看懂了)", title):
+        score -= 0.65
     if "和很多人想的可能不太一样" in title and len(title) > 24:
         score -= 0.25
     if len(title) < 12:
@@ -269,6 +340,51 @@ def _generate_wechat_draft_with_fallback(
     raise RuntimeError("初稿生成失败：未捕获到有效异常")
 
 
+def _apply_latest_anti_ai_polish_if_enabled(
+    *,
+    active_llm_config: dict,
+    title: str,
+    content_md: str,
+    cluster: dict,
+    source_materials: list[dict],
+    prompt_excerpt: str,
+    progress_cb: ProgressCallback | None = None,
+    log_prefix: str = "",
+) -> tuple[str, str, str, dict | None]:
+    if active_llm_config.get("anti_ai_polish_enabled", True) is False:
+        return title, content_md, prompt_excerpt, None
+
+    prefix = f"{log_prefix} " if log_prefix else ""
+    try:
+        _emit(progress_cb, "info", f"{prefix}开始按最新降AI Prompt 二次改稿：{title}")
+        anti_ai_title, anti_ai_content, anti_ai_prompt_excerpt, anti_ai_alignment = polish_wechat_draft_with_latest_anti_ai_prompt(
+            llm_config=active_llm_config,
+            title=title,
+            content_md=content_md,
+            cluster=cluster,
+            source_materials=source_materials,
+            max_chars=int(active_llm_config.get("draft_max_chars", 2600)),
+        )
+        if anti_ai_alignment.get("changed"):
+            _emit(
+                progress_cb,
+                "warning",
+                (
+                    f"{prefix}降AI改稿后标题被纠偏：原标题={anti_ai_alignment.get('original_title')}｜"
+                    f"改后={anti_ai_alignment.get('final_title')}｜原因={anti_ai_alignment.get('reason')}"
+                ),
+            )
+        prompt_excerpt = (
+            f"{prompt_excerpt[:760]}\n\n"
+            f"--- 最新降AI Prompt 改稿 ---\n{anti_ai_prompt_excerpt[:380]}"
+        )[:1200]
+        _emit(progress_cb, "success", f"{prefix}最新降AI Prompt 改稿完成：{anti_ai_title}")
+        return anti_ai_title, anti_ai_content, prompt_excerpt, anti_ai_alignment
+    except Exception as exc:
+        _emit(progress_cb, "warning", f"{prefix}最新降AI Prompt 改稿失败，继续使用上一版稿件：{exc}")
+        return title, content_md, prompt_excerpt, {"changed": False, "error": str(exc)}
+
+
 def _summarize_draft_failures(failed_items: list[dict] | None) -> str:
     failed_items = failed_items or []
     if not failed_items:
@@ -327,6 +443,22 @@ WEAK_TITLE_PATTERNS = (
     r"这事和你有关吗",
 )
 
+TOUTIAO_TITLE_IMAGE_STOPWORDS = {
+    "很多人",
+    "大家",
+    "这个",
+    "这件事",
+    "背后",
+    "真正",
+    "细节",
+    "问题",
+    "热闹",
+    "普通人",
+    "为什么",
+    "怎么",
+    "时候",
+}
+
 
 def _draft_has_weak_distribution_title(draft: dict) -> bool:
     title = str(draft.get("title") or draft.get("canonical_title") or "").strip()
@@ -336,6 +468,103 @@ def _draft_has_weak_distribution_title(draft: dict) -> bool:
     if len(compact) > 30:
         return True
     return any(re.search(pattern, compact) for pattern in WEAK_TITLE_PATTERNS)
+
+
+def _draft_local_image_count(draft: dict) -> int:
+    content = _draft_archive_markdown(draft)
+    if not content:
+        return 0
+    return len(re.findall(r"^\s*!\[[^\]]*\]\([^)]+\)\s*$", content, flags=re.M))
+
+
+def _draft_archive_markdown(draft: dict) -> str:
+    archive_path = str(draft.get("archive_path") or "").strip()
+    if not archive_path:
+        return ""
+    try:
+        from pathlib import Path
+
+        path = Path(archive_path)
+        if not path.exists() or not path.is_file():
+            return ""
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def _draft_has_local_images(draft: dict) -> bool:
+    return _draft_local_image_count(draft) > 0
+
+
+def _draft_real_event_uses_ai_images(draft: dict) -> bool:
+    content = _draft_archive_markdown(draft)
+    if not content:
+        return False
+    if "ai_img_" not in content.replace("\\", "/").lower():
+        return False
+    title = str(draft.get("title") or draft.get("canonical_title") or "")
+    return _should_prefer_real_event_images(title, content, {})
+
+
+def _draft_title_image_relevance(draft: dict) -> tuple[bool, str]:
+    content = _draft_archive_markdown(draft)
+    if not content:
+        return False, "归档正文为空，无法校验封面相关度"
+    title = str(draft.get("toutiao_selected_title") or draft.get("title") or draft.get("canonical_title") or "")
+    image_refs = []
+    for alt, ref in re.findall(r"!\[([^\]]*)\]\(([^)]+)\)", content or ""):
+        filename = ref.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        stem = filename.rsplit(".", 1)[0]
+        image_refs.append(f"{alt} {stem}")
+    normalized_title = unicodedata.normalize("NFKC", title)
+    title_terms = [
+        term
+        for term in re.findall(r"[A-Za-z0-9]{2,}|[\u4e00-\u9fff]{2,6}", normalized_title)
+        if term not in TOUTIAO_TITLE_IMAGE_STOPWORDS
+    ]
+    if not title_terms:
+        return False, "头条标题缺少可用于封面校验的具体关键词"
+    image_text = " ".join(image_refs).lower()
+    matched = [term for term in title_terms if term.lower() in image_text]
+    if matched:
+        return True, ""
+    real_event = _should_prefer_real_event_images(title, content, {})
+    # 抽象话题允许插画/场景图，但仍要求正文中能支撑标题关键词。
+    body_without_images = re.sub(r"^\s*!\[[^\]]*\]\([^)]+\)\s*$", "", content, flags=re.M)
+    body_without_images = re.sub(r"^\s*#{1,6}\s+.*$", "", body_without_images, flags=re.M)
+    if any(term in body_without_images for term in title_terms):
+        return True, ""
+    if real_event and not _draft_real_event_uses_ai_images(draft):
+        # 真实热点若已使用原文/联网真实图片，文件名常是 img_01，不能用本地文件名误杀。
+        return True, ""
+    return False, "封面/正文与头条标题关键词关联不足"
+
+
+def _toutiao_publish_ready(draft: dict) -> tuple[bool, str]:
+    """Local gate for Toutiao recommendation-feed publishing."""
+    if _draft_has_weak_distribution_title(draft):
+        return False, "标题过于模板化或不适合头条推荐流"
+    image_count = _draft_local_image_count(draft)
+    if image_count <= 0:
+        return False, "稿件无本地插图，头条封面吸引力不足"
+    if image_count < 3:
+        return False, "稿件本地插图少于3张，头条三图封面素材不足"
+    if _draft_real_event_uses_ai_images(draft):
+        return False, "真实热点仍使用 AI 假现场图，头条自动发布已拦截"
+    relevant, relevance_reason = _draft_title_image_relevance(draft)
+    if not relevant:
+        return False, relevance_reason
+    appeal = _toutiao_distribution_appeal(draft)
+    if appeal < -0.2:
+        return False, "头条推荐流吸引力评分过低"
+    return True, ""
+
+
+def _wechat_publish_ready(draft: dict, *, min_review_score: float = 8.2) -> tuple[bool, str, dict]:
+    quality = evaluate_wechat_publish_quality(draft, min_score=min_review_score, require_image=True)
+    if not quality.get("ok"):
+        return False, str(quality.get("summary") or "公众号低创作度风险"), quality
+    return True, "", quality
 
 
 def _top_scored_drafts_for_publish(
@@ -348,9 +577,19 @@ def _top_scored_drafts_for_publish(
     preferred_only: bool = False,
     enable_wechat: bool = True,
     enable_toutiao: bool = True,
+    allow_cross_channel_duplicates: bool = False,
     min_review_score: float = 8.2,
+    min_toutiao_score: float | None = None,
+    toutiao_topic_whitelist: list[str] | None = None,
 ) -> list[dict]:
+    ensure_channel_columns(settings)
     candidates = fetch_recent_drafts(settings, limit=max(limit * 8, recent_scan_limit))
+    toutiao_topic_whitelist = [
+        str(item).strip()
+        for item in (toutiao_topic_whitelist or DEFAULT_TOUTIAO_TOPIC_WHITELIST)
+        if str(item).strip()
+    ]
+    min_toutiao_score_value = float(min_toutiao_score if min_toutiao_score is not None else min_review_score)
     selected: list[dict] = []
     seen_ids: set[int] = set()
     matched: list[dict] = []
@@ -368,16 +607,20 @@ def _top_scored_drafts_for_publish(
         if preferred_only and draft_id not in preferred_id_set:
             continue
         score = row.get("review_score")
-        if score is None:
+        if score is None and not enable_toutiao:
             continue
         score_value = _score_to_float(score)
-        if score_value is None or score_value < float(min_review_score):
+        toutiao_score_value = _score_to_float(row.get("toutiao_score"))
+        wechat_score_ok = score_value is not None and score_value >= float(min_review_score)
+        toutiao_score_ok = toutiao_score_value is not None and toutiao_score_value >= min_toutiao_score_value
+        if not wechat_score_ok and not (enable_toutiao and toutiao_score_ok):
             continue
         if _draft_has_weak_distribution_title(row):
-            continue
-        # 自动发布阶段按“热点首发”处理：任一渠道已经发过的稿件，不再进入自动发布池。
-        # 这样可避免同一篇稿件先发微信后再发头条，或反过来二次发送。
-        if row.get("wechat_uploaded_at") or row.get("toutiao_uploaded_at"):
+            # 公众号仍可发，头条独立走更严格准入，不在这里整体丢弃。
+            pass
+        same_draft_wechat_available = bool(enable_wechat) and not bool(row.get("wechat_uploaded_at"))
+        same_draft_toutiao_available = bool(enable_toutiao) and not bool(row.get("toutiao_uploaded_at"))
+        if not allow_cross_channel_duplicates and (row.get("wechat_uploaded_at") or row.get("toutiao_uploaded_at")):
             continue
         published_same_topic = find_published_draft_for_topic(
             settings,
@@ -386,7 +629,38 @@ def _top_scored_drafts_for_publish(
             draft_title=row.get("title") or "",
             exclude_draft_id=draft_id,
         )
-        if published_same_topic:
+        if published_same_topic and not allow_cross_channel_duplicates:
+            continue
+        published_wechat = bool(published_same_topic and published_same_topic.get("wechat_uploaded_at"))
+        published_toutiao = bool(published_same_topic and published_same_topic.get("toutiao_uploaded_at"))
+        wechat_ready, wechat_block_reason, wechat_quality = _wechat_publish_ready(
+            row,
+            min_review_score=float(min_review_score),
+        )
+        auto_wechat_available = (
+            same_draft_wechat_available
+            and wechat_score_ok
+            and not _draft_has_weak_distribution_title(row)
+            and wechat_ready
+            and (allow_cross_channel_duplicates or not published_wechat)
+        )
+        toutiao_ready, toutiao_block_reason = _toutiao_publish_ready(row)
+        topic_category = str(row.get("toutiao_topic_category") or "").strip()
+        if not topic_category:
+            topic_category, _priority, _hits = classify_toutiao_topic(
+                str(row.get("title") or row.get("canonical_title") or ""),
+                _draft_archive_markdown(row),
+            )
+        if topic_category not in toutiao_topic_whitelist:
+            toutiao_ready = False
+            toutiao_block_reason = f"头条题材不在白名单：{topic_category}"
+        auto_toutiao_available = (
+            same_draft_toutiao_available
+            and (allow_cross_channel_duplicates or not published_toutiao)
+            and toutiao_ready
+            and toutiao_score_ok
+        )
+        if allow_cross_channel_duplicates and not (auto_wechat_available or auto_toutiao_available):
             continue
         seen_ids.add(draft_id)
         item = dict(row)
@@ -394,6 +668,13 @@ def _top_scored_drafts_for_publish(
         item["preference_matched"] = ok
         item["matched_keyword"] = matched_keyword
         item["current_run_generated"] = draft_id in preferred_id_set
+        item["auto_wechat_available"] = auto_wechat_available
+        item["auto_toutiao_available"] = auto_toutiao_available
+        item["wechat_block_reason"] = wechat_block_reason
+        item["wechat_quality"] = wechat_quality
+        item["toutiao_block_reason"] = toutiao_block_reason
+        item["effective_toutiao_topic_category"] = topic_category
+        item["published_same_topic"] = published_same_topic
         if ok:
             matched.append(item)
         else:
@@ -403,12 +684,16 @@ def _top_scored_drafts_for_publish(
         draft_id = int(item.get("id") or 0)
         score = _score_to_float(item.get("review_score"))
         score_value = float(score) if score is not None else -1.0
+        toutiao_score = _score_to_float(item.get("toutiao_score"))
+        toutiao_score_value = float(toutiao_score) if toutiao_score is not None else -1.0
         appeal = _toutiao_distribution_appeal(item) if enable_toutiao else 0.0
+        topic_boost = 0.3 if item.get("effective_toutiao_topic_category") in toutiao_topic_whitelist else 0.0
         created_at = item.get("created_at")
         created_key = created_at.timestamp() if hasattr(created_at, "timestamp") else 0
         return (
             0 if draft_id in preferred_id_set else 1,
-            -(score_value + appeal),
+            -(max(score_value, toutiao_score_value) + appeal + topic_boost),
+            -toutiao_score_value,
             -score_value,
             -created_key,
             -draft_id,
@@ -508,26 +793,46 @@ def _publish_selected_drafts(
         _emit(progress_cb, "info", f"[发布 {idx}/{total}] 开始：draft_id={draft_id}｜评分={score_text}｜{title[:60]}")
 
         if enable_wechat:
-            last_exc = None
-            for attempt in range(1, max(1, max_retries) + 1):
-                try:
-                    wechat_result = publish_draft_to_wechat(settings, draft_id)
-                    if wechat_result.get("already_uploaded"):
-                        wechat_skipped.append(wechat_result)
-                        _emit(progress_cb, "warning", f"[发布 {idx}/{total}] 微信已跳过重复：draft_id={draft_id}")
-                    else:
-                        wechat_published.append(wechat_result)
-                        _emit(progress_cb, "success", f"[发布 {idx}/{total}] 微信已推送：draft_id={draft_id}")
-                    last_exc = None
-                    break
-                except Exception as exc:
-                    last_exc = exc
-                    if attempt < max(1, max_retries):
-                        _emit(progress_cb, "warning", f"[发布 {idx}/{total}] 微信推送失败，准备重试 {attempt}/{max_retries}：draft_id={draft_id}｜{exc}")
-                        continue
-            if last_exc is not None:
-                wechat_failed.append({"draft_id": draft_id, "title": title, "error": str(last_exc)})
-                _emit(progress_cb, "error", f"[发布 {idx}/{total}] 微信推送失败：draft_id={draft_id}｜{last_exc}")
+            min_review_score = float(_automation_publish_config(settings).get("min_publish_score", 8.2) or 8.2)
+            wechat_ready, wechat_block_reason, wechat_quality = _wechat_publish_ready(
+                draft,
+                min_review_score=min_review_score,
+            )
+            if not wechat_ready:
+                skipped_item = {
+                    "draft_id": draft_id,
+                    "title": title,
+                    "error": wechat_block_reason,
+                    "quality": wechat_quality,
+                    "low_quality_blocked": True,
+                }
+                wechat_skipped.append(skipped_item)
+                _emit(
+                    progress_cb,
+                    "warning",
+                    f"[发布 {idx}/{total}] 微信低创作度风险已拦截：draft_id={draft_id}｜{wechat_block_reason}",
+                )
+            else:
+                last_exc = None
+                for attempt in range(1, max(1, max_retries) + 1):
+                    try:
+                        wechat_result = publish_draft_to_wechat(settings, draft_id)
+                        if wechat_result.get("already_uploaded"):
+                            wechat_skipped.append(wechat_result)
+                            _emit(progress_cb, "warning", f"[发布 {idx}/{total}] 微信已跳过重复：draft_id={draft_id}")
+                        else:
+                            wechat_published.append(wechat_result)
+                            _emit(progress_cb, "success", f"[发布 {idx}/{total}] 微信已推送：draft_id={draft_id}")
+                        last_exc = None
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt < max(1, max_retries):
+                            _emit(progress_cb, "warning", f"[发布 {idx}/{total}] 微信推送失败，准备重试 {attempt}/{max_retries}：draft_id={draft_id}｜{exc}")
+                            continue
+                if last_exc is not None:
+                    wechat_failed.append({"draft_id": draft_id, "title": title, "error": str(last_exc)})
+                    _emit(progress_cb, "error", f"[发布 {idx}/{total}] 微信推送失败：draft_id={draft_id}｜{last_exc}")
 
         if enable_toutiao:
             last_exc = None
@@ -578,7 +883,6 @@ def _publish_selected_drafts(
         "toutiao_skipped": toutiao_skipped,
         "toutiao_failed": toutiao_failed,
     }
-
 
 def _existing_draft_payload(draft: dict) -> dict:
     return {
@@ -891,6 +1195,16 @@ def run_manual_topic_draft(settings: Settings, topic: str, max_sources: int = 6,
             _emit(progress_cb, "success", f"AI自检改稿完成：{title}")
         except Exception as exc:
             _emit(progress_cb, "warning", f"AI自检改稿失败，继续使用原初稿：{exc}")
+    title, content_md, prompt_excerpt, _anti_ai_alignment = _apply_latest_anti_ai_polish_if_enabled(
+        active_llm_config=active_llm_config,
+        title=title,
+        content_md=content_md,
+        cluster=cluster,
+        source_materials=sources,
+        prompt_excerpt=prompt_excerpt,
+        progress_cb=progress_cb,
+        log_prefix="[手动话题]",
+    )
     duplicate_after_generation = find_existing_draft_for_topic(
         settings,
         canonical_title=clean_topic,
@@ -952,6 +1266,31 @@ def run_manual_topic_draft(settings: Settings, topic: str, max_sources: int = 6,
     except Exception as exc:
         _emit(progress_cb, "warning", f"初稿已生成，但评分失败：draft_id={draft_id}｜{exc}")
 
+    toutiao_score = None
+    toutiao_summary = ""
+    toutiao_meta: dict = {}
+    try:
+        _emit(progress_cb, "info", f"开始头条专用评分与标题候选：draft_id={draft_id}")
+        toutiao_score, toutiao_summary, _toutiao_prompt, toutiao_meta = review_toutiao_draft(
+            llm_config=active_llm_config,
+            title=title,
+            content_md=final_content,
+            char_limit=30,
+        )
+        update_draft_toutiao_review(
+            settings=settings,
+            draft_id=draft_id,
+            toutiao_score=toutiao_score,
+            toutiao_summary=toutiao_summary,
+            toutiao_model=active_llm_config["model"],
+            topic_category=str(toutiao_meta.get("topic_category") or ""),
+            title_candidates=toutiao_meta.get("title_candidates") or [],
+            selected_title=str(toutiao_meta.get("selected_title") or ""),
+        )
+        _emit(progress_cb, "success", f"头条评分完成：头条分 {toutiao_score:.1f}｜标题={toutiao_meta.get('selected_title') or title}")
+    except Exception as exc:
+        _emit(progress_cb, "warning", f"头条专用评分失败，后续仅保留公众号评分：draft_id={draft_id}｜{exc}")
+
     payload = {
         "draft_id": draft_id,
         "cluster_id": bundle["cluster_id"],
@@ -962,6 +1301,10 @@ def run_manual_topic_draft(settings: Settings, topic: str, max_sources: int = 6,
         "image_source": image_source,
         "review_score": review_score,
         "review_summary": review_summary,
+        "toutiao_score": toutiao_score,
+        "toutiao_summary": toutiao_summary,
+        "toutiao_selected_title": toutiao_meta.get("selected_title") if toutiao_meta else "",
+        "toutiao_topic_category": toutiao_meta.get("topic_category") if toutiao_meta else "",
     }
     _emit(progress_cb, "success", f"手动话题初稿完成：draft_id={draft_id}｜配图 {downloaded_images} 张｜{title}")
     _notify(
@@ -1279,6 +1622,16 @@ def run_generate_drafts(
                         "warning",
                         f"[成稿 {idx}/{total}] AI自检改稿失败，继续使用原初稿：{polish_exc}",
                     )
+            title, content_md, prompt_excerpt, _anti_ai_alignment = _apply_latest_anti_ai_polish_if_enabled(
+                active_llm_config=active_llm_config,
+                title=title,
+                content_md=content_md,
+                cluster=cluster,
+                source_materials=cluster["sources"],
+                prompt_excerpt=prompt_excerpt,
+                progress_cb=progress_cb,
+                log_prefix=f"[成稿 {idx}/{total}]",
+            )
             duplicate_after_generation = find_existing_draft_for_topic(
                 settings,
                 cluster_id=int(cluster["cluster_id"]),
@@ -1357,6 +1710,38 @@ def run_generate_drafts(
                     "warning",
                     f"[成稿 {idx}/{total}] 初稿已生成，但模型审核评分失败：draft_id={draft_id}｜{review_exc}",
                 )
+            toutiao_score = None
+            toutiao_summary = ""
+            toutiao_meta: dict = {}
+            try:
+                _emit(progress_cb, "info", f"[成稿 {idx}/{total}] 开始头条专用评分与标题候选：draft_id={draft_id}")
+                toutiao_score, toutiao_summary, _toutiao_prompt, toutiao_meta = review_toutiao_draft(
+                    llm_config=active_llm_config,
+                    title=title,
+                    content_md=final_content,
+                    char_limit=30,
+                )
+                update_draft_toutiao_review(
+                    settings=settings,
+                    draft_id=draft_id,
+                    toutiao_score=toutiao_score,
+                    toutiao_summary=toutiao_summary,
+                    toutiao_model=active_llm_config["model"],
+                    topic_category=str(toutiao_meta.get("topic_category") or ""),
+                    title_candidates=toutiao_meta.get("title_candidates") or [],
+                    selected_title=str(toutiao_meta.get("selected_title") or ""),
+                )
+                _emit(
+                    progress_cb,
+                    "success",
+                    f"[成稿 {idx}/{total}] 头条评分完成：头条分 {toutiao_score:.1f}｜标题={toutiao_meta.get('selected_title') or title}",
+                )
+            except Exception as toutiao_review_exc:
+                _emit(
+                    progress_cb,
+                    "warning",
+                    f"[成稿 {idx}/{total}] 头条专用评分失败，后续仅保留公众号评分：draft_id={draft_id}｜{toutiao_review_exc}",
+                )
             generated.append(
                 {
                     "draft_id": draft_id,
@@ -1368,12 +1753,20 @@ def run_generate_drafts(
                     "image_source": image_source,
                     "review_score": review_score,
                     "review_summary": review_summary,
+                    "toutiao_score": toutiao_score,
+                    "toutiao_summary": toutiao_summary,
+                    "toutiao_selected_title": toutiao_meta.get("selected_title") if toutiao_meta else "",
+                    "toutiao_topic_category": toutiao_meta.get("topic_category") if toutiao_meta else "",
                 }
             )
             _emit(
                 progress_cb,
                 "success",
-                f"[成稿 {idx}/{total}] 生成完成：draft_id={draft_id}｜文章分={review_score if review_score is not None else '未评分'}｜{title}",
+                (
+                    f"[成稿 {idx}/{total}] 生成完成：draft_id={draft_id}｜"
+                    f"公众号分={review_score if review_score is not None else '未评分'}｜"
+                    f"头条分={toutiao_score if toutiao_score is not None else '未评分'}｜{title}"
+                ),
             )
             _notify(
                 settings,
@@ -1382,6 +1775,8 @@ def run_generate_drafts(
                     f"标题：{title}",
                     f"配图：{downloaded_images} 张（来源={image_source}）",
                     f"文章分：{review_score:.1f}" if review_score is not None else "文章分：暂未生成",
+                    f"头条分：{toutiao_score:.1f}" if toutiao_score is not None else "头条分：暂未生成",
+                    f"头条标题：{toutiao_meta.get('selected_title')}" if toutiao_meta.get("selected_title") else "头条标题：暂未生成",
                 ],
                 level="success",
             )
@@ -1418,13 +1813,13 @@ def run_generate_drafts(
         progress_cb,
         finish_level,
         (
-            f"公众号初稿生成完成：generated={len(generated)}/{target_count} "
+            f"初稿生成完成：generated={len(generated)}/{target_count} "
             f"attempted={attempted} skipped_existing={len(skipped_existing)} failed={len(failed)}"
         ),
     )
     _notify(
         settings,
-        "已完成：公众号初稿批量生成",
+        "已完成：初稿批量生成",
         [
             f"目标：{target_count} 篇",
             f"成功：{len(generated)} 篇",
@@ -1432,6 +1827,7 @@ def run_generate_drafts(
             f"重复跳过：{len(skipped_existing)} 篇",
             f"失败：{len(failed)} 篇",
             f"新闻类跳过：{skipped_newslike} 条",
+            "说明：已同步生成公众号文章分与头条专用分。",
         ],
         level=finish_level,
     )
@@ -1493,6 +1889,78 @@ def run_review_drafts(settings: Settings, limit: int = 10, progress_cb: Progress
         [
             f"已评分：{len(reviewed)} 篇",
             f"失败：{len(failed)} 篇",
+        ],
+        level=level,
+    )
+    return payload
+
+
+def run_review_toutiao_drafts(settings: Settings, limit: int = 10, progress_cb: ProgressCallback | None = None) -> dict:
+    runtime_config = load_runtime_config(settings)
+    llm_config = runtime_config.get("llm", {})
+    if not llm_config.get("api_key"):
+        raise RuntimeError("local_settings.json 未配置 llm.api_key")
+
+    drafts = fetch_untoutiao_reviewed_drafts(settings, limit=max(1, limit))
+    total = len(drafts)
+    reviewed = []
+    failed = []
+    _emit(progress_cb, "info", f"待头条专用评分初稿：{total} 篇｜模型={llm_config.get('model', '')}")
+
+    for idx, draft in enumerate(drafts, start=1):
+        title = draft.get("title") or draft.get("canonical_title") or f"draft-{draft['id']}"
+        _emit(progress_cb, "info", f"[头条评分 {idx}/{total}] 开始：draft_id={draft['id']}｜{title[:60]}")
+        try:
+            score, summary, _prompt, meta = review_toutiao_draft(
+                llm_config=llm_config,
+                title=title,
+                content_md=draft.get("content_md") or "",
+                char_limit=30,
+            )
+            update_draft_toutiao_review(
+                settings=settings,
+                draft_id=draft["id"],
+                toutiao_score=score,
+                toutiao_summary=summary,
+                toutiao_model=llm_config["model"],
+                topic_category=str(meta.get("topic_category") or ""),
+                title_candidates=meta.get("title_candidates") or [],
+                selected_title=str(meta.get("selected_title") or ""),
+            )
+            reviewed.append(
+                {
+                    "draft_id": draft["id"],
+                    "title": title,
+                    "toutiao_score": score,
+                    "toutiao_summary": summary,
+                    "toutiao_selected_title": meta.get("selected_title") or "",
+                    "toutiao_topic_category": meta.get("topic_category") or "",
+                }
+            )
+            _emit(
+                progress_cb,
+                "success",
+                f"[头条评分 {idx}/{total}] 完成：头条分 {score:.1f}｜标题={meta.get('selected_title') or title}",
+            )
+        except Exception as exc:
+            failed.append({"draft_id": draft["id"], "title": title, "error": str(exc)})
+            _emit(progress_cb, "error", f"[头条评分 {idx}/{total}] 失败：draft_id={draft['id']}｜{exc}")
+
+    payload = {
+        "reviewed_count": len(reviewed),
+        "failed_count": len(failed),
+        "reviewed": reviewed,
+        "failed": failed,
+    }
+    level = "success" if not failed else "warning"
+    _emit(progress_cb, level, f"头条专用评分完成：reviewed={len(reviewed)} failed={len(failed)}")
+    _notify(
+        settings,
+        "已完成：头条专用评分",
+        [
+            f"已评分：{len(reviewed)} 篇",
+            f"失败：{len(failed)} 篇",
+            "说明：头条分独立于公众号文章分，用于后续头条自动发布选稿。",
         ],
         level=level,
     )
@@ -1594,19 +2062,31 @@ def run_daily_auto_publish(
     hotspot_limit: int | None = None,
     draft_limit: int | None = None,
     publish_limit: int | None = None,
+    publish_lead_minutes: int | None = None,
     progress_cb: ProgressCallback | None = None,
 ) -> dict:
     config = _automation_publish_config(settings)
-    current_schedule_time = str(schedule_time or config.get("schedule_time") or "07:00").strip() or "07:00"
+    current_schedule_time = str(schedule_time or config.get("schedule_time") or "11:30").strip() or "11:30"
     final_draft_limit = max(1, int(draft_limit or config.get("draft_limit") or 10))
     final_hotspot_limit = max(
         final_draft_limit,
         int(hotspot_limit or config.get("hotspot_limit") or 30),
     )
-    final_publish_limit = max(1, int(publish_limit or config.get("publish_limit") or 3))
+    default_publish_limit = max(0, int(publish_limit or config.get("publish_limit") or 3))
+    final_wechat_publish_limit = max(0, int(config.get("wechat_publish_limit", default_publish_limit) or 0))
+    final_toutiao_publish_limit = max(0, int(config.get("toutiao_publish_limit", default_publish_limit) or 0))
+    final_publish_limit = max(default_publish_limit, final_wechat_publish_limit, final_toutiao_publish_limit)
     min_publish_score = max(0.0, min(float(config.get("min_publish_score") or 8.2), 10.0))
-    enable_wechat = bool(config.get("enable_wechat", True))
-    enable_toutiao = bool(config.get("enable_toutiao", True))
+    min_toutiao_score = max(0.0, min(float(config.get("min_toutiao_score") or min_publish_score), 10.0))
+    toutiao_topic_whitelist = [
+        str(item).strip()
+        for item in (config.get("toutiao_topic_whitelist") or DEFAULT_TOUTIAO_TOPIC_WHITELIST)
+        if str(item).strip()
+    ]
+    enable_wechat = bool(config.get("enable_wechat", True)) and final_wechat_publish_limit > 0
+    enable_toutiao = bool(config.get("enable_toutiao", True)) and final_toutiao_publish_limit > 0
+    allow_cross_channel_duplicates = bool(config.get("allow_cross_channel_duplicates", False))
+    final_publish_lead_minutes = max(0, min(int(publish_lead_minutes if publish_lead_minutes is not None else config.get("publish_lead_minutes", 30) or 0), 180))
     retry_count = max(1, int(config.get("retry_count") or 2))
     notify_on_scrape = bool(config.get("notify_on_scrape", True))
     notify_on_draft_generated = bool(config.get("notify_on_draft_generated", True))
@@ -1620,7 +2100,11 @@ def run_daily_auto_publish(
     _emit(
         progress_cb,
         "info",
-        f"自动任务开始：{_now_shanghai_text()}｜热点候选 {final_hotspot_limit} 个｜生成 {final_draft_limit} 篇｜择优发布 {final_publish_limit} 篇｜发布分数线 {min_publish_score:.1f}",
+        (
+            f"自动任务开始：{_now_shanghai_text()}｜热点候选 {final_hotspot_limit} 个｜生成 {final_draft_limit} 篇｜"
+            f"微信 {final_wechat_publish_limit} 篇｜头条 {final_toutiao_publish_limit} 篇｜"
+            f"公众号分数线 {min_publish_score:.1f}｜头条分数线 {min_toutiao_score:.1f}"
+        ),
     )
     _notify_if(
         notify_on_scrape,
@@ -1631,9 +2115,14 @@ def run_daily_auto_publish(
             f"本次时间槽：{current_schedule_time}",
             f"热点候选：{final_hotspot_limit} 个",
             f"目标初稿：{final_draft_limit} 篇",
-            f"计划发布：{final_publish_limit} 篇",
-            f"发布分数线：{min_publish_score:.1f}",
+            f"公众号计划发布：{final_wechat_publish_limit} 篇",
+            f"头条计划发布：{final_toutiao_publish_limit} 篇",
+            f"公众号分数线：{min_publish_score:.1f}",
+            f"头条分数线：{min_toutiao_score:.1f}",
+            f"头条题材白名单：{' / '.join(toutiao_topic_whitelist)}",
+            f"提前准备：{final_publish_lead_minutes} 分钟",
             f"发布渠道：{_publish_channel_label(enable_wechat, enable_toutiao)}",
+            f"允许跨渠道重复：{'是' if allow_cross_channel_duplicates else '否'}",
         ],
         level="info",
     )
@@ -1676,8 +2165,7 @@ def run_daily_auto_publish(
         level="success" if not draft_result.get("failed_count") else "warning",
     )
 
-    channel_count = int(bool(enable_wechat)) + int(bool(enable_toutiao))
-    selection_limit = final_publish_limit * max(1, channel_count)
+    selection_limit = max(1, final_wechat_publish_limit + final_toutiao_publish_limit)
     selected_pool = _top_scored_drafts_for_publish(
         settings,
         selection_limit,
@@ -1686,18 +2174,21 @@ def run_daily_auto_publish(
         preferred_only=True,
         enable_wechat=enable_wechat,
         enable_toutiao=enable_toutiao,
+        allow_cross_channel_duplicates=allow_cross_channel_duplicates,
         min_review_score=min_publish_score,
+        min_toutiao_score=min_toutiao_score,
+        toutiao_topic_whitelist=toutiao_topic_whitelist,
     )
     toutiao_selected: list[dict] = []
     wechat_selected: list[dict] = []
     if enable_toutiao:
-        toutiao_selected = selected_pool[:final_publish_limit]
+        toutiao_selected = [item for item in selected_pool if item.get("auto_toutiao_available")][:final_toutiao_publish_limit]
     if enable_wechat:
-        used_by_toutiao = {int(item.get("id") or 0) for item in toutiao_selected}
+        used_by_toutiao = set() if allow_cross_channel_duplicates else {int(item.get("id") or 0) for item in toutiao_selected}
         wechat_selected = [
             item for item in selected_pool
-            if int(item.get("id") or 0) not in used_by_toutiao
-        ][:final_publish_limit]
+            if item.get("auto_wechat_available") and int(item.get("id") or 0) not in used_by_toutiao
+        ][:final_wechat_publish_limit]
     selected_channel_map: dict[int, list[str]] = {}
     selected: list[dict] = []
     seen_selected_ids: set[int] = set()
@@ -1716,7 +2207,8 @@ def run_daily_auto_publish(
         (
             f"自动任务选稿完成：本轮新稿 {len(current_run_draft_ids)} 篇｜"
             f"头条 {len(toutiao_selected)} 篇｜微信 {len(wechat_selected)} 篇｜"
-            f"分数线 {min_publish_score:.1f}｜同一篇不会同时发两个渠道"
+            f"公众号分数线 {min_publish_score:.1f}｜头条分数线 {min_toutiao_score:.1f}｜"
+            f"{'允许同一篇分发到两个渠道' if allow_cross_channel_duplicates else '同一篇不会同时发两个渠道'}"
         ),
     )
     run_at_text = _now_shanghai_text()
@@ -1726,7 +2218,10 @@ def run_daily_auto_publish(
         if draft_result.get("generated_count", 0) <= 0 and draft_result.get("failed_count", 0) > 0 and failure_reason:
             end_message = f"自动任务结束：初稿未生成成功（{failure_reason}）"
         elif draft_result.get("generated_count", 0) > 0:
-            end_message = f"自动任务结束：本轮稿件未达到自动发布分数线 {min_publish_score:.1f}"
+            end_message = (
+                f"自动任务结束：本轮稿件未达到自动发布分数线"
+                f"（公众号 {min_publish_score:.1f} / 头条 {min_toutiao_score:.1f}）"
+            )
         brief = create_daily_publish_brief(
             run_at=run_at_text,
             status="warning",
@@ -1767,6 +2262,13 @@ def run_daily_auto_publish(
                 "hotspot_limit": final_hotspot_limit,
                 "draft_limit": final_draft_limit,
                 "publish_limit": final_publish_limit,
+                "wechat_publish_limit": final_wechat_publish_limit,
+                "toutiao_publish_limit": final_toutiao_publish_limit,
+                "allow_cross_channel_duplicates": allow_cross_channel_duplicates,
+                "publish_lead_minutes": final_publish_lead_minutes,
+                "min_publish_score": min_publish_score,
+                "min_toutiao_score": min_toutiao_score,
+                "toutiao_topic_whitelist": toutiao_topic_whitelist,
                 "retry_count": retry_count,
                 "enable_wechat": enable_wechat,
                 "enable_toutiao": enable_toutiao,
@@ -1784,11 +2286,14 @@ def run_daily_auto_publish(
                 (
                     f"本次没有可发布稿件，主要原因：{failure_reason}"
                     if failure_reason and draft_result.get("generated_count", 0) <= 0
-                    else f"本次生成了稿件，但没有达到自动发布分数线 {min_publish_score:.1f}，已保留在编辑器里。"
+                    else f"本次生成了稿件，但没有达到自动发布分数线：公众号 {min_publish_score:.1f} / 头条 {min_toutiao_score:.1f}，已保留在编辑器里。"
                 ),
                 f"初稿生成成功：{draft_result['generated_count']} 篇",
                 f"初稿生成失败：{draft_result.get('failed_count', 0)} 篇",
-                f"发布分数线：{min_publish_score:.1f}",
+                f"公众号分数线：{min_publish_score:.1f}",
+                f"头条分数线：{min_toutiao_score:.1f}",
+                f"公众号计划：{final_wechat_publish_limit} 篇",
+                f"头条计划：{final_toutiao_publish_limit} 篇",
                 f"今日简报：{brief.get('brief_path')}",
             ],
             level="warning",
@@ -1798,6 +2303,15 @@ def run_daily_auto_publish(
             "selected_count": 0,
             "selected_drafts": [],
             "brief": _json_safe(brief),
+            "publish_plan": {
+                "wechat_publish_limit": final_wechat_publish_limit,
+                "toutiao_publish_limit": final_toutiao_publish_limit,
+                "allow_cross_channel_duplicates": allow_cross_channel_duplicates,
+                "publish_lead_minutes": final_publish_lead_minutes,
+                "min_publish_score": min_publish_score,
+                "min_toutiao_score": min_toutiao_score,
+                "toutiao_topic_whitelist": toutiao_topic_whitelist,
+            },
             "publish": {
                 "requested_count": 0,
                 "wechat_published_count": 0,
@@ -1815,6 +2329,11 @@ def run_daily_auto_publish(
             },
         }
 
+    wait_result = _wait_until_publish_time(
+        current_schedule_time,
+        final_publish_lead_minutes,
+        progress_cb=progress_cb,
+    )
     publish_results: list[dict] = []
     if toutiao_selected:
         _emit(progress_cb, "info", f"自动任务开始发布今日头条：{len(toutiao_selected)} 篇（默认勾选头条首发）")
@@ -1829,7 +2348,11 @@ def run_daily_auto_publish(
             )
         )
     if wechat_selected:
-        _emit(progress_cb, "info", f"自动任务开始推送微信公众号：{len(wechat_selected)} 篇（已排除头条入选稿）")
+        _emit(
+            progress_cb,
+            "info",
+            f"自动任务开始推送微信公众号：{len(wechat_selected)} 篇（{'允许与头条重复' if allow_cross_channel_duplicates else '已排除头条入选稿'}）",
+        )
         publish_results.append(
             _publish_selected_drafts(
                 settings,
@@ -1850,11 +2373,28 @@ def run_daily_auto_publish(
         draft_id = int(row["id"])
         current = fetch_draft_by_id(settings, draft_id) or row
         review_score = _score_to_float(current.get("review_score"))
+        toutiao_score = _score_to_float(current.get("toutiao_score"))
+        toutiao_title = (
+            current.get("toutiao_selected_title")
+            or row.get("toutiao_selected_title")
+            or current.get("title")
+            or current.get("canonical_title")
+            or f"draft_id={draft_id}"
+        )
+        topic_category = (
+            current.get("toutiao_topic_category")
+            or row.get("effective_toutiao_topic_category")
+            or row.get("toutiao_topic_category")
+            or ""
+        )
         selected_payload.append(
             {
                 "draft_id": draft_id,
                 "title": current.get("title") or current.get("canonical_title") or f"draft_id={draft_id}",
                 "review_score": review_score,
+                "toutiao_score": toutiao_score,
+                "toutiao_selected_title": toutiao_title,
+                "toutiao_topic_category": topic_category,
                 "created_at_text": current.get("created_at_text") or row.get("created_at_text") or "",
                 "preference_matched": bool(row.get("preference_matched")),
                 "matched_keyword": row.get("matched_keyword") or "",
@@ -1870,11 +2410,19 @@ def run_daily_auto_publish(
     def _selected_title_text(item: dict) -> str:
         channels = "/".join(str(channel) for channel in (item.get("publish_channels") or []) if str(channel).strip())
         channel_suffix = f"，渠道 {channels}" if channels else ""
-        if item.get("review_score") is not None:
-            score = _score_to_float(item.get("review_score"))
-            preference_suffix = f"，偏好 {item['matched_keyword']}" if item.get("matched_keyword") else ""
-            return f"{item['title'][:22]}（{score:.1f}分{preference_suffix}{channel_suffix}）"
-        return f"{item['title'][:22]}（未评分{channel_suffix}）"
+        preference_suffix = f"，偏好 {item['matched_keyword']}" if item.get("matched_keyword") else ""
+        score_parts: list[str] = []
+        article_score = _score_to_float(item.get("review_score"))
+        if article_score is not None:
+            score_parts.append(f"公众号 {article_score:.1f}")
+        toutiao_score = _score_to_float(item.get("toutiao_score"))
+        if toutiao_score is not None:
+            score_parts.append(f"头条 {toutiao_score:.1f}")
+        if item.get("toutiao_topic_category"):
+            score_parts.append(str(item["toutiao_topic_category"]))
+        score_text = " / ".join(score_parts) if score_parts else "未评分"
+        display_title = str(item.get("toutiao_selected_title") or item.get("title") or "") if "今日头条" in (item.get("publish_channels") or []) else str(item.get("title") or "")
+        return f"{display_title[:24]}（{score_text}{preference_suffix}{channel_suffix}）"
 
     selected_titles = "；".join(_selected_title_text(item) for item in selected_payload)
     _notify_if(
@@ -1884,6 +2432,15 @@ def run_daily_auto_publish(
         [
             f"执行时间：{run_at_text}",
             f"已选高分稿件：{len(selected_payload)} 篇",
+            f"公众号计划：{final_wechat_publish_limit} 篇",
+            f"头条计划：{final_toutiao_publish_limit} 篇",
+            f"公众号分数线：{min_publish_score:.1f}",
+            f"头条分数线：{min_toutiao_score:.1f}",
+            f"头条题材白名单：{' / '.join(toutiao_topic_whitelist)}",
+            f"正式发文时间：{current_schedule_time}",
+            f"提前准备：{final_publish_lead_minutes} 分钟",
+            f"等待发布：{'已等待到点' if wait_result.get('waited') else wait_result.get('reason', '未等待')}",
+            f"跨渠道重复：{'允许' if allow_cross_channel_duplicates else '不允许'}",
             f"公众号：{'已关闭' if not enable_wechat else f'成功 {publish_result['wechat_published_count']} / 跳过 {publish_result['wechat_skipped_count']} / 失败 {publish_result['wechat_failed_count']}'}",
             f"今日头条：{'已关闭' if not enable_toutiao else f'成功 {publish_result['toutiao_published_count']} / 跳过 {publish_result['toutiao_skipped_count']} / 失败 {publish_result['toutiao_failed_count']}'}",
             "入选稿件：" + (selected_titles or "无"),
@@ -1910,6 +2467,28 @@ def run_daily_auto_publish(
             f"头条成功 {publish_result['toutiao_published_count']}"
         ),
     )
+    growth_snapshot: dict | None = None
+    if enable_toutiao and (
+        publish_result["toutiao_published_count"]
+        or publish_result["toutiao_skipped_count"]
+        or publish_result["toutiao_failed_count"]
+    ):
+        try:
+            growth_snapshot = save_toutiao_growth_snapshot(
+                settings,
+                limit=50,
+                source="auto-publish",
+                note=(
+                    f"自动任务发布后记录｜时间槽 {current_schedule_time}｜"
+                    f"头条成功 {publish_result['toutiao_published_count']}｜"
+                    f"失败 {publish_result['toutiao_failed_count']}｜"
+                    f"入选 {len(toutiao_selected)} 篇"
+                ),
+            )
+            _emit(progress_cb, "info", f"头条增长快照已保存：{growth_snapshot.get('snapshot_path')}")
+        except Exception as exc:
+            growth_snapshot = {"ok": False, "error": str(exc)}
+            _emit(progress_cb, "warning", f"头条增长快照保存失败：{exc}")
     _notify_if(
         notify_on_publish_finished,
         settings,
@@ -1918,6 +2497,7 @@ def run_daily_auto_publish(
             f"简报标题：{brief.get('title')}",
             f"简报路径：{brief.get('brief_path')}",
             f"入选稿件：{len(selected_payload)} 篇",
+            f"头条增长日志：{growth_snapshot.get('growth_log_path') if growth_snapshot and growth_snapshot.get('ok') else '本轮未生成或保存失败'}",
         ],
         level=summary_level,
     )
@@ -1934,6 +2514,10 @@ def run_daily_auto_publish(
             "hotspot_limit": final_hotspot_limit,
             "draft_limit": final_draft_limit,
             "publish_limit": final_publish_limit,
+            "wechat_publish_limit": final_wechat_publish_limit,
+            "toutiao_publish_limit": final_toutiao_publish_limit,
+            "allow_cross_channel_duplicates": allow_cross_channel_duplicates,
+            "publish_lead_minutes": final_publish_lead_minutes,
             "retry_count": retry_count,
             "enable_wechat": enable_wechat,
             "enable_toutiao": enable_toutiao,
@@ -1953,6 +2537,17 @@ def run_daily_auto_publish(
         "selected_count": len(selected_payload),
         "selected_drafts": _json_safe(selected_payload),
         "brief": _json_safe(brief),
+        "toutiao_growth": _json_safe(growth_snapshot or {}),
+        "wait_until_publish": _json_safe(wait_result),
+        "publish_plan": {
+            "wechat_publish_limit": final_wechat_publish_limit,
+            "toutiao_publish_limit": final_toutiao_publish_limit,
+            "allow_cross_channel_duplicates": allow_cross_channel_duplicates,
+            "publish_lead_minutes": final_publish_lead_minutes,
+            "min_publish_score": min_publish_score,
+                "min_toutiao_score": min_toutiao_score,
+                "toutiao_topic_whitelist": toutiao_topic_whitelist,
+        },
         "publish": _json_safe(copy.deepcopy(publish_result)),
     }
 

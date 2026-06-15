@@ -19,6 +19,7 @@ from playwright.async_api import BrowserContext, Page, TimeoutError as Playwrigh
 
 from .config import Settings, load_runtime_config
 from .db import fetch_draft_by_id, fetch_recent_drafts, mark_draft_toutiao_uploaded
+from .llm import _should_prefer_real_event_images, optimize_toutiao_article
 from .wechat_publisher import ARTICLE_STYLE, _image_bytes_for_wechat, _read_markdown, _wechat_compatible_html
 
 
@@ -28,11 +29,28 @@ TOUTIAO_LIST_API = "https://mp.toutiao.com/mp/agw/article/list/"
 TOUTIAO_PUBLISH_API = "https://mp.toutiao.com/mp/agw/article/publish"
 DEFAULT_TITLE_CHAR_LIMIT = 30
 DEFAULT_MAX_INLINE_IMAGES = 6
+DEFAULT_TOUTIAO_MAX_CONTENT_CHARS = 1800
+DEFAULT_TOUTIAO_MIN_CONTENT_CHARS = 450
 DEFAULT_VERIFY_LIST_LIMIT = 20
 DEFAULT_TOUTIAO_COLLECTION_NAME = "这事和你有关"
 DEFAULT_TOUTIAO_STATEMENT_LABELS = ["个人观点，仅供参考"]
 DEFAULT_PUBLISH_LOCK_WAIT_SECONDS = 900
 DEFAULT_PUBLISH_LOCK_STALE_SECONDS = 1800
+TOUTIAO_TITLE_IMAGE_STOPWORDS = {
+    "很多人",
+    "大家",
+    "这个",
+    "这件事",
+    "背后",
+    "真正",
+    "细节",
+    "问题",
+    "热闹",
+    "普通人",
+    "为什么",
+    "怎么",
+    "时候",
+}
 PROFILE_IGNORE_NAMES = {
     "SingletonLock",
     "SingletonSocket",
@@ -64,6 +82,31 @@ RECOVERABLE_AFTER_PUBLISH_STAGES = {
     "build_failure_diagnostic",
     "mark_uploaded",
 }
+TOUTIAO_UNPUBLISHABLE_TITLE_PATTERNS = (
+    r"很多人吵的是同一个问题",
+    r"热闹之外还有一层现实",
+    r"背后那笔账才值得细看",
+    r"真正有意思的是场外那层情绪",
+    r"大家吵来吵去，其实都卡在同一个地方",
+    r"很多人点开看的是自己",
+    r"最该看懂的是具体影响",
+    r"朋友圈到底在吵啥",
+    r"这事和你有关",
+    r"我突然看懂了",
+    r"从.{2,12}到.{2,12}$",
+    r"\d+(?:比|-|:)$",
+    r"比\d+大$",
+    r"会不会不会",
+)
+TOUTIAO_PLACEHOLDER_BODY_PATTERNS = (
+    r"^正文[.。…]*$",
+    r"^内容[.。…]*$",
+    r"^待补充[.。…]*$",
+    r"^文章正文[.。…]*$",
+    r"^这里是正文[.。…]*$",
+    r"^\.\.\.$",
+    r"^…+$",
+)
 
 
 class ToutiaoPublishError(RuntimeError):
@@ -140,6 +183,8 @@ def _toutiao_config(settings: Settings) -> dict[str, Any]:
         # 即使 local_settings 里历史配置为 100，也在发布链路强制收敛到平台上限，避免自动任务卡在保存失败。
         "title_char_limit": max(20, min(int(raw.get("title_char_limit") or DEFAULT_TITLE_CHAR_LIMIT), DEFAULT_TITLE_CHAR_LIMIT)),
         "max_inline_images": max(0, min(int(raw.get("max_inline_images") or DEFAULT_MAX_INLINE_IMAGES), 12)),
+        "optimize_for_feed": bool(raw.get("optimize_for_feed", True)),
+        "max_content_chars": max(900, min(int(raw.get("max_content_chars") or DEFAULT_TOUTIAO_MAX_CONTENT_CHARS), 2600)),
         "verify_list_limit": max(5, min(int(raw.get("verify_list_limit") or DEFAULT_VERIFY_LIST_LIMIT), 50)),
         "auto_open_login_on_publish": bool(raw.get("auto_open_login_on_publish", True)),
         "username": (raw.get("username") or "").strip(),
@@ -160,6 +205,7 @@ def _toutiao_config(settings: Settings) -> dict[str, Any]:
         "debug_dir": str(
             Path(raw.get("debug_dir") or (Path(__file__).resolve().parents[2] / "data" / "toutiao_debug")).resolve()
         ),
+        "llm": runtime.get("llm") or {},
     }
 
 
@@ -241,6 +287,244 @@ def _toutiao_title(title: str, char_limit: int = DEFAULT_TITLE_CHAR_LIMIT) -> st
     if len(clean) <= char_limit:
         return clean
     return clean[:char_limit].rstrip("，。！？、；：…-— ") or clean[:char_limit]
+
+
+def _compact_toutiao_text(value: str) -> str:
+    return re.sub(r"\s+", "", (value or "").strip())
+
+
+def _is_unpublishable_toutiao_title(title: str) -> bool:
+    clean = _compact_toutiao_text((title or "").strip().strip("#"))
+    if not clean:
+        return True
+    if len(clean) < 8 or len(clean) > DEFAULT_TITLE_CHAR_LIMIT:
+        return True
+    if clean in {"正文", "内容", "未命名稿件", "今天这件事"}:
+        return True
+    return any(re.search(pattern, clean) for pattern in TOUTIAO_UNPUBLISHABLE_TITLE_PATTERNS)
+
+
+def _markdown_body_without_images(content_md: str) -> str:
+    body = re.sub(r"^\s*!\[[^\]]*\]\([^)]+\)\s*$", "", content_md or "", flags=re.M)
+    body = re.sub(r"^\s*#\s+.*$", "", body, count=1, flags=re.M)
+    body = re.sub(r"```.*?```", "", body, flags=re.S)
+    body = re.sub(r"`([^`]+)`", r"\1", body)
+    body = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", body)
+    return re.sub(r"\n{3,}", "\n\n", body).strip()
+
+
+def _plain_body_from_markdown(content_md: str) -> str:
+    body = _markdown_body_without_images(content_md)
+    body = re.sub(r"^#{1,6}\s*", "", body, flags=re.M)
+    body = re.sub(r"[>*_`~|]", "", body)
+    body = re.sub(r"\n{3,}", "\n\n", body)
+    return body.strip()
+
+
+def _is_placeholder_body(text: str) -> bool:
+    compact = _compact_toutiao_text(text)
+    if not compact:
+        return True
+    if any(re.fullmatch(pattern, compact, flags=re.I) for pattern in TOUTIAO_PLACEHOLDER_BODY_PATTERNS):
+        return True
+    paragraphs = [_compact_toutiao_text(part) for part in re.split(r"\n\s*\n", text or "") if _compact_toutiao_text(part)]
+    if any(
+        any(re.fullmatch(pattern, paragraph, flags=re.I) for pattern in TOUTIAO_PLACEHOLDER_BODY_PATTERNS)
+        for paragraph in paragraphs[:3]
+    ):
+        return True
+    if paragraphs and all(
+        any(re.fullmatch(pattern, paragraph, flags=re.I) for pattern in TOUTIAO_PLACEHOLDER_BODY_PATTERNS)
+        for paragraph in paragraphs[:2]
+    ):
+        return True
+    return False
+
+
+def _effective_toutiao_paragraph_count(content_md: str) -> int:
+    body = _plain_body_from_markdown(content_md)
+    count = 0
+    for paragraph in re.split(r"\n\s*\n", body):
+        clean = _compact_toutiao_text(paragraph)
+        if len(clean) >= 30 and not any(
+            re.fullmatch(pattern, clean, flags=re.I) for pattern in TOUTIAO_PLACEHOLDER_BODY_PATTERNS
+        ):
+            count += 1
+    return count
+
+
+def _markdown_local_image_refs(content_md: str) -> list[str]:
+    refs: list[str] = []
+    for match in re.finditer(r"!\[[^\]]*\]\(([^)]+)\)", content_md or ""):
+        ref = (match.group(1) or "").strip().strip("\"'")
+        if ref:
+            refs.append(ref)
+    return refs
+
+
+def _markdown_uses_ai_images(content_md: str) -> bool:
+    return any("ai_img_" in ref.replace("\\", "/").lower() for ref in _markdown_local_image_refs(content_md))
+
+
+def _markdown_image_count(content_md: str) -> int:
+    return len(re.findall(r"^\s*!\[[^\]]*\]\([^)]+\)\s*$", content_md or "", flags=re.M))
+
+
+def _title_image_keyword_relevant(title: str, content_md: str, cover_paths: list[Path]) -> tuple[bool, str]:
+    normalized_title = re.sub(r"\s+", "", title or "")
+    terms = [
+        term
+        for term in re.findall(r"[A-Za-z0-9]{2,}|[\u4e00-\u9fff]{2,6}", normalized_title)
+        if term and term not in TOUTIAO_TITLE_IMAGE_STOPWORDS
+    ]
+    if not terms:
+        return False, "头条标题缺少可用于封面校验的具体关键词"
+    image_text = " ".join(path.stem for path in cover_paths[:3]).lower()
+    matched = [term for term in terms if term.lower() in image_text]
+    if matched:
+        return True, ""
+    body_without_images = re.sub(r"^\s*!\[[^\]]*\]\([^)]+\)\s*$", "", content_md or "", flags=re.M)
+    body_without_images = re.sub(r"^\s*#{1,6}\s+.*$", "", body_without_images, flags=re.M)
+    if any(term in body_without_images for term in terms):
+        return True, ""
+    if _should_prefer_real_event_images(title, content_md, {}) and not _markdown_uses_ai_images(content_md):
+        # 真实热点优先用原文/联网真实图；这类图的本地文件名常是 img_01，不能仅凭文件名误杀。
+        return True, ""
+    return False, "封面与标题关键词无明显关联"
+
+
+def _validate_toutiao_publish_payload(
+    *,
+    title: str,
+    content_md: str,
+    plain_text: str,
+    source_title: str,
+    cover_paths: list[Path] | None = None,
+) -> None:
+    """Final non-retryable gate before opening the Toutiao editor."""
+
+    if _is_unpublishable_toutiao_title(title):
+        raise ToutiaoPublishError(
+            f"头条发布前校验失败：标题过弱或模板化（{title}）",
+            retryable=False,
+        )
+
+    body_plain = _plain_body_from_markdown(content_md)
+    body_compact = _compact_toutiao_text(body_plain)
+    html_compact = _compact_toutiao_text(plain_text)
+    if _is_placeholder_body(body_plain) or _is_placeholder_body(plain_text):
+        raise ToutiaoPublishError("头条发布前校验失败：正文疑似占位符，已阻止发布", retryable=False)
+    if len(body_compact) < DEFAULT_TOUTIAO_MIN_CONTENT_CHARS or len(html_compact) < DEFAULT_TOUTIAO_MIN_CONTENT_CHARS:
+        raise ToutiaoPublishError(
+            (
+                "头条发布前校验失败：正文过短，已阻止发布"
+                f"（Markdown {len(body_compact)} 字 / 渲染后 {len(html_compact)} 字）"
+            ),
+            retryable=False,
+        )
+    paragraph_count = _effective_toutiao_paragraph_count(content_md)
+    if paragraph_count < 4:
+        raise ToutiaoPublishError(
+            f"头条发布前校验失败：有效段落不足（{paragraph_count} 段），已阻止发布",
+            retryable=False,
+        )
+    image_count = _markdown_image_count(content_md)
+    valid_cover_paths = [path for path in (cover_paths or []) if path.exists() and path.is_file()]
+    if image_count < 3 or len(valid_cover_paths) < 3:
+        raise ToutiaoPublishError(
+            f"头条发布前校验失败：少于 3 张可用配图（正文 {image_count} 张 / 可用封面 {len(valid_cover_paths)} 张），已阻止发布",
+            retryable=False,
+        )
+    source_text = f"{source_title}\n{content_md[:1600]}"
+    if _markdown_uses_ai_images(content_md) and _should_prefer_real_event_images(source_title, content_md, {}):
+        raise ToutiaoPublishError(
+            "头条发布前校验失败：真实热点仍使用 AI 假现场图，已阻止发布",
+            diagnostics={"source_title": source_title, "real_event_check_text": source_text[:500]},
+            retryable=False,
+        )
+    relevant, reason = _title_image_keyword_relevant(title, content_md, valid_cover_paths)
+    if not relevant:
+        raise ToutiaoPublishError(
+            f"头条发布前校验失败：{reason}",
+            diagnostics={
+                "title": title,
+                "source_title": source_title,
+                "cover_paths": [str(path) for path in valid_cover_paths[:3]],
+            },
+            retryable=False,
+        )
+
+
+def _merge_toutiao_text_with_original_images(optimized_md: str, original_md: str, title: str) -> str:
+    """Use Toutiao-optimized text while preserving already generated local images."""
+    images = re.findall(r"^\s*!\[[^\]]*\]\([^)]+\)\s*$", original_md or "", flags=re.M)
+    body = re.sub(r"^\s*!\[[^\]]*\]\([^)]+\)\s*$", "", optimized_md or "", flags=re.M)
+    body = re.sub(r"^#\s+.*$", f"# {title}", body, count=1, flags=re.M).strip()
+    if not images:
+        return body + "\n"
+
+    lines = body.splitlines()
+    output: list[str] = []
+    image_index = 0
+    paragraph_count = 0
+    insert_after = {1, 3, 5}
+    for line in lines:
+        output.append(line)
+        stripped = line.strip()
+        is_paragraph = bool(stripped) and not (
+            stripped.startswith("#")
+            or stripped.startswith(">")
+            or stripped.startswith("- ")
+            or stripped.startswith("* ")
+            or re.match(r"^\d+[.)、]\s+", stripped)
+        )
+        if not is_paragraph or image_index >= len(images):
+            continue
+        paragraph_count += 1
+        if paragraph_count in insert_after:
+            output.extend(["", images[image_index], ""])
+            image_index += 1
+    if image_index < len(images):
+        if output and output[-1].strip():
+            output.append("")
+        for image in images[image_index:]:
+            output.extend([image, ""])
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip() + "\n"
+
+
+def _prepare_toutiao_publish_markdown(
+    config: dict[str, Any],
+    draft: dict[str, Any],
+    content_md: str,
+    archive_path: Path,
+) -> tuple[str, str, dict[str, Any]]:
+    source_title = draft.get("title") or draft.get("canonical_title") or archive_path.stem
+    stored_toutiao_title = (draft.get("toutiao_selected_title") or "").strip()
+    if not config.get("optimize_for_feed", True):
+        title = _toutiao_title(stored_toutiao_title or source_title, char_limit=config["title_char_limit"])
+        return title, content_md, {"optimized": False, "reason": "disabled"}
+    title, optimized_md, prompt_excerpt, meta = optimize_toutiao_article(
+        config.get("llm") or {},
+        source_title,
+        content_md,
+        char_limit=int(config["title_char_limit"]),
+        max_chars=int(config["max_content_chars"]),
+    )
+    if stored_toutiao_title and not _is_unpublishable_toutiao_title(stored_toutiao_title):
+        title = stored_toutiao_title
+    title = _toutiao_title(title, char_limit=config["title_char_limit"])
+    final_md = _merge_toutiao_text_with_original_images(optimized_md, content_md, title)
+    meta = dict(meta or {})
+    meta.update(
+        {
+            "optimized": True,
+            "source_title": source_title,
+            "prompt_excerpt": prompt_excerpt[:500],
+            "final_title": title,
+            "stored_toutiao_title": stored_toutiao_title,
+        }
+    )
+    return title, final_md, meta
 
 
 def _existing_uploaded_payload(config: dict[str, Any], draft_id: int, draft: dict[str, Any]) -> dict[str, Any]:
@@ -2102,11 +2386,13 @@ async def _publish_draft_to_toutiao_core(
     if not archive_path.exists():
         raise RuntimeError(f"稿件归档文件不存在：{archive_path}")
 
-    title = _toutiao_title(
-        draft.get("title") or draft.get("canonical_title") or archive_path.stem,
-        char_limit=config["title_char_limit"],
-    )
     content_md = _read_markdown(archive_path)
+    title, content_md, toutiao_optimize_meta = _prepare_toutiao_publish_markdown(
+        config,
+        draft,
+        content_md,
+        archive_path,
+    )
     content_html, cover_paths, inline_image_count = _render_markdown_to_toutiao_html(
         content_md=content_md,
         title=title,
@@ -2114,6 +2400,13 @@ async def _publish_draft_to_toutiao_core(
         max_inline_images=config["max_inline_images"],
     )
     plain_text = _html_to_plain_text(content_html)
+    _validate_toutiao_publish_payload(
+        title=title,
+        content_md=content_md,
+        plain_text=plain_text,
+        source_title=str(draft.get("title") or draft.get("canonical_title") or archive_path.stem),
+        cover_paths=cover_paths,
+    )
 
     context: BrowserContext | None = None
     page: Page | None = None
@@ -2227,6 +2520,8 @@ async def _publish_draft_to_toutiao_core(
             "collection_name": publish_options_result["collection_name"],
             "statement_labels": publish_options_result["statement_labels"],
             "publish_more_income": publish_options_result["publish_more_income"],
+            "toutiao_optimized": bool(toutiao_optimize_meta.get("optimized")),
+            "toutiao_optimize_meta": toutiao_optimize_meta,
             "browser_profile_dir": config["browser_profile_dir"],
             "used_fresh_profile": bool(getattr(context, "_hotrank_used_fresh_profile", False)),
             "profile_copy_summary": getattr(context, "_hotrank_profile_copy_summary", {}),

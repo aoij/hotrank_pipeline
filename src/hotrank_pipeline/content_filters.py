@@ -142,6 +142,63 @@ SOURCE_IMAGE_URL_BLOCKLIST_TOKENS = (
 )
 
 
+ADULT_IMAGE_URL_BLOCKLIST_TOKENS = (
+    "porn",
+    "porno",
+    "sex",
+    "sexy",
+    "xxx",
+    "hentai",
+    "nsfw",
+    "nude",
+    "naked",
+    "erotic",
+    "onlyfans",
+    "playboy",
+    "strip",
+    "fetish",
+    "boob",
+    "boobs",
+    "breast",
+    "busty",
+    "lingerie",
+    "bikini",
+    "swimsuit",
+    "cameltoe",
+    "upskirt",
+    "milf",
+    "jav",
+)
+
+
+SAFE_WEB_IMAGE_HOST_ALLOWLIST = (
+    "images.unsplash.com",
+    "unsplash.com",
+    "images.pexels.com",
+    "pexels.com",
+    "cdn.pixabay.com",
+    "pixabay.com",
+    "upload.wikimedia.org",
+    "wikimedia.org",
+    "wikipedia.org",
+    "weibo.com",
+    "sinaimg.cn",
+    "sinaimg.com",
+    "wx.qq.com",
+    "mmbiz.qpic.cn",
+    "qpic.cn",
+    "gtimg.cn",
+    "qq.com",
+    "toutiao.com",
+    "toutiaoimg.com",
+    "byteimg.com",
+    "douyin.com",
+    "douyinpic.com",
+    "sohu.com",
+    "sohucs.com",
+)
+
+
 SOURCE_IMAGE_CONTEXT_BLOCKLIST_KEYWORDS = (
     "新用户点击",
     "即可关注",
@@ -210,7 +267,27 @@ def is_blocked_source_image_url(url: str) -> bool:
     """过滤明显来源标识、关注引导、新闻通稿站点、头像/logo/二维码等图片 URL。"""
 
     lowered = _lower_url_text(url)
-    return any(token in lowered for token in SOURCE_IMAGE_URL_BLOCKLIST_TOKENS)
+    return any(token in lowered for token in SOURCE_IMAGE_URL_BLOCKLIST_TOKENS) or any(
+        token in lowered for token in ADULT_IMAGE_URL_BLOCKLIST_TOKENS
+    )
+
+
+def is_adult_or_risky_image_url(url: str) -> bool:
+    """过滤成人视频/擦边/高风险 URL。"""
+
+    lowered = _lower_url_text(url)
+    return any(token in lowered for token in ADULT_IMAGE_URL_BLOCKLIST_TOKENS)
+
+
+def is_allowed_web_search_image_url(url: str) -> bool:
+    """联网搜图兜底只保留白名单域名，宁可少图也不要违规图。"""
+
+    if not url or is_blocked_source_image_url(url) or is_adult_or_risky_image_url(url):
+        return False
+    host = (urlparse(url).netloc or "").lower().strip()
+    if host.startswith("www."):
+        host = host[4:]
+    return any(host == domain or host.endswith("." + domain) for domain in SAFE_WEB_IMAGE_HOST_ALLOWLIST)
 
 
 def is_blocked_image_context(text: str) -> bool:

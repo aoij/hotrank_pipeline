@@ -1,0 +1,469 @@
+<form method="post" action="/config">
+              <input type="hidden" name="next_url" value="{{ next_url | default('/settings') }}">
+              <div class="config-module" id="module-model">
+                <div class="config-module-head">
+                  <div>
+                    <h4 class="config-module-title">模型接入与写作策略</h4>
+                    <p class="config-module-desc">集中管理成稿模型、推理强度、代理策略、提示词和稿件归档目录。</p>
+                  </div>
+                  <span class="config-badge">Model</span>
+                </div>
+                <div class="config-grid">
+                  <div class="field">
+                    <label>LLM Base URL</label>
+                    <input name="llm_base_url" value="{{ runtime.llm.base_url }}">
+                  </div>
+                  <div class="field">
+                    <label>LLM 模型</label>
+                    <input name="llm_model" value="{{ runtime.llm.model }}">
+                  </div>
+                  <div class="field">
+                    <label>推理强度</label>
+                    <input name="llm_reasoning_effort" value="{{ runtime.llm.reasoning_effort if runtime.llm.reasoning_effort is defined else 'xhigh' }}" placeholder="例如：xhigh / high / medium / low">
+                    <div class="form-tip">OpenAI 兼容网关支持时会传给 <code>reasoning_effort</code>；不支持的模型会按网关兼容策略处理。</div>
+                  </div>
+                  <div class="field">
+                    <label>LLM API Key（留空则保持当前值）</label>
+                    <input name="llm_api_key" placeholder="当前：{{ masked_api_key }}">
+                  </div>
+                  <div class="field span-2">
+                    <div class="toggle-grid">
+                      <label class="toggle-card">
+                        <input type="checkbox" name="llm_disable_env_proxy" {% if runtime.llm.disable_env_proxy is not defined or runtime.llm.disable_env_proxy %}checked{% endif %}>
+                        <span><strong>成稿模型请求不走系统代理</strong>生成初稿、AI 自检改稿、文章评分都会忽略 Windows 全局 HTTP(S)_PROXY，避免小米 Mimo 等国内模型出现 SSL EOF。</span>
+                      </label>
+                      <label class="toggle-card">
+                        <input type="checkbox" name="llm_anti_ai_polish_enabled" {% if runtime.llm.anti_ai_polish_enabled is not defined or runtime.llm.anti_ai_polish_enabled %}checked{% endif %}>
+                        <span><strong>启用最新降 AI Prompt 二次改稿</strong>初稿和 AI 自检后，会再按项目内 <code>prompts/anti_ai/20260614_kejiang_zhuque</code> 的规则做一次真人感改写。</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="field span-2">
+                    <label>生成文章 Prompt（可配置）</label>
+                    <textarea class="prompt-textarea" name="llm_draft_prompt" placeholder="留空使用系统内置公众号主笔 Prompt。可用变量：{topic}、{cluster_summary}、{item_count}、{sources}、{editorial_plan_name}、{editorial_tone}、{opening_strategy}、{section_suggestions}、{purpose}、{expected_words}、{timeliness}">{{ runtime.llm.draft_prompt or '' }}</textarea>
+                    <div class="prompt-help">
+                      留空会使用默认公众号 Prompt；填写后会完全按这里生成。支持变量：
+                      <code>{topic}</code>、<code>{cluster_summary}</code>、<code>{item_count}</code>、<code>{sources}</code>、<code>{editorial_plan_name}</code>、<code>{editorial_tone}</code>、<code>{opening_strategy}</code>、<code>{section_suggestions}</code>、<code>{purpose}</code>、<code>{expected_words}</code>、<code>{timeliness}</code>。
+                    </div>
+                  </div>
+                  <div class="field span-2">
+                    <label>稿件归档目录</label>
+                    <input name="draft_output_dir" value="{{ runtime.draft_output_dir }}">
+                  </div>
+                </div>
+              </div>
+
+              <div class="config-module" id="module-source">
+                <div class="config-module-head">
+                  <div>
+                    <h4 class="config-module-title">热点来源与选题过滤</h4>
+                    <p class="config-module-desc">控制抓取入口、白名单、扩展源、新闻感过滤，以及旧热点自动清理策略。</p>
+                  </div>
+                  <span class="config-badge">Source</span>
+                </div>
+                <div class="toggle-grid" style="margin-bottom: 14px;">
+                  <label class="toggle-card">
+                    <input type="checkbox" name="content_sources_include_tophub" {% if content_sources.include_tophub %}checked{% endif %}>
+                    <span><strong>抓取 TopHub 新闻页</strong>保留当前主入口，继续从 TopHub 汇入热点榜单。</span>
+                  </label>
+                  <label class="toggle-card">
+                    <input type="checkbox" name="content_sources_enabled" {% if content_sources.enabled %}checked{% endif %}>
+                    <span><strong>启用扩展内容源</strong>同时接入 DailyHot、RSSHub、RSS 等来源，给模型更多选题素材。</span>
+                  </label>
+                  <label class="toggle-card" style="grid-column: 1 / -1;">
+                    <input type="checkbox" name="content_filter_exclude_newslike" {% if runtime.content_filter is not defined or runtime.content_filter.exclude_newslike %}checked{% endif %}>
+                    <span><strong>过滤新闻快讯 / 通报公告类选题</strong>补抓和成稿阶段会跳过偏新闻播报、官方通报、政策公告、硬新闻快讯类内容，优先保留适合公众号二创解读的选题。</span>
+                  </label>
+                </div>
+                <div class="config-grid">
+                  <div class="field span-2">
+                    <label>榜单白名单（逗号分隔）</label>
+                    <textarea name="board_whitelist">{{ runtime.board_whitelist | join(', ') }}</textarea>
+                    <div class="form-tip">留空表示所有已入库榜单都参与聚类；多来源接入后建议保留：微博、知乎、百度、B站、36氪、虎嗅、掘金、V2EX、HelloGitHub、澎湃、微信。</div>
+                  </div>
+                  <div class="field">
+                    <label>DailyHot API 地址</label>
+                    <input name="dailyhot_base_url" value="{{ content_sources.dailyhot_base_url or '' }}" placeholder="例如：http://127.0.0.1:6688 或 https://hot-api.xxx.com">
+                    <div class="form-tip">可接入自建 DailyHotApi。系统会按下面的 route 拼接请求，例如 /weibo、/zhihu、/bilibili。</div>
+                  </div>
+                  <div class="field">
+                    <label>单个内容源最多抓取条目数</label>
+                    <input type="number" min="1" max="100" name="content_sources_max_items" value="{{ content_sources.max_items_per_board or 30 }}">
+                  </div>
+                  <div class="field">
+                    <label>DailyHot Routes（逗号或换行分隔）</label>
+                    <textarea name="dailyhot_routes">{{ content_sources.dailyhot_routes | join('\n') }}</textarea>
+                  </div>
+                  <div class="field">
+                    <label>RSS / RSSHub 源（每行一个，格式：名称|URL）</label>
+                    <textarea name="rss_feeds" placeholder="V2EX 最热|https://rsshub.app/v2ex/topics/hot&#10;少数派|https://rsshub.app/sspai/index">{{ rss_feeds_text }}</textarea>
+                    <div class="form-tip">适合接 RSSHub、垂直站 RSS、行业信息源。入库后复用现有聚类、补抓、成稿链路。</div>
+                  </div>
+                </div>
+                <div class="toggle-grid" style="margin-top: 14px;">
+                  <label class="toggle-card">
+                    <input type="checkbox" name="hotspot_cleanup_enabled" {% if runtime.hotspot_cleanup is not defined or runtime.hotspot_cleanup.enabled %}checked{% endif %}>
+                    <span><strong>一键执行前自动清理旧热点缓存</strong>只清理热点抓取批次和未成稿聚类，已生成文章的关联聚类会保留。</span>
+                  </label>
+                  <div class="field">
+                    <label>热点保留时长（小时）</label>
+                    <input type="number" min="1" max="720" name="hotspot_cleanup_retention_hours" value="{{ runtime.hotspot_cleanup.retention_hours if runtime.hotspot_cleanup is defined and runtime.hotspot_cleanup.retention_hours else 48 }}">
+                  </div>
+                </div>
+              </div>
+
+              <div class="config-module" id="module-image">
+                <div class="config-module-head">
+                  <div>
+                    <h4 class="config-module-title">插图与生图策略</h4>
+                    <p class="config-module-desc">默认 AI 生图优先；体育赛事、明星真人、直播发布会、事故现场等真实热点会自动改为真实图优先，AI 仅兜底。</p>
+                  </div>
+                  <span class="config-badge">Image</span>
+                </div>
+                <div class="config-grid">
+                  <div class="field">
+                    <label>每篇稿件最多插图数</label>
+                    <input type="number" min="1" max="12" name="image_max_per_draft" value="{{ runtime.images.max_per_draft if runtime.images else 6 }}">
+                  </div>
+                  <div class="field">
+                    <label>单个来源最多取图数</label>
+                    <input type="number" min="1" max="8" name="image_max_per_source" value="{{ runtime.images.max_per_source if runtime.images else 3 }}">
+                  </div>
+                </div>
+                <div class="toggle-grid" style="margin-top: 14px; margin-bottom: 14px;">
+                  <label class="toggle-card">
+                    <input type="checkbox" name="image_prefer_ai_generated" {% if runtime.images is not defined or runtime.images.prefer_ai_generated %}checked{% endif %}>
+                    <span><strong>优先使用 AI 生图</strong>抽象科普/生活解读优先 AI 生图；真实人物、赛事、现场类会自动让原文图/联网真实图优先。</span>
+                  </label>
+                  <label class="toggle-card">
+                    <input type="checkbox" name="image_fallback_to_source" {% if runtime.images is not defined or runtime.images.fallback_to_source is not defined or runtime.images.fallback_to_source %}checked{% endif %}>
+                    <span><strong>生图失败后回退原文取图</strong>优先保留已有素材，避免整篇文章因为生图失败而没图可用。</span>
+                  </label>
+                  <label class="toggle-card" style="grid-column: 1 / -1;">
+                    <input type="checkbox" name="image_fallback_to_web_search" {% if runtime.images is not defined or runtime.images.fallback_to_web_search is not defined or runtime.images.fallback_to_web_search %}checked{% endif %}>
+                    <span><strong>原文无图时联网搜图兜底</strong>真实热点顺序：原文取图 → 联网搜图 → AI兜底；其他稿件仍按 AI 生图优先。联网搜图会过滤成人内容、新华社、央视、logo、水印、二维码等明显不适合图片。</span>
+                  </label>
+                </div>
+                <div class="config-grid">
+                  <div class="field">
+                    <label>生图 API 地址</label>
+                    <input name="image_generation_base_url" value="{{ runtime.images.generation.base_url if runtime.images and runtime.images.generation else '' }}" placeholder="例如：https://xxx/v1 或 https://xxx/v1/images/generations">
+                  </div>
+                  <div class="field">
+                    <label>生图模型</label>
+                    <input name="image_generation_model" value="{{ runtime.images.generation.model if runtime.images and runtime.images.generation else '' }}" placeholder="例如：gpt-image-1 / flux / 即梦模型名">
+                  </div>
+                  <div class="field">
+                    <label>生图 API Key（留空则保持当前值）</label>
+                    <input name="image_generation_api_key" placeholder="当前：{{ masked_image_api_key }}">
+                  </div>
+                  <div class="field">
+                    <label>生图尺寸</label>
+                    <input name="image_generation_size" value="{{ runtime.images.generation.size if runtime.images and runtime.images.generation and runtime.images.generation.size else '1024x1024' }}">
+                  </div>
+                  <div class="field">
+                    <label>生图并发数</label>
+                    <input type="number" min="1" max="12" name="image_generation_concurrency" value="{{ runtime.images.generation.concurrency if runtime.images and runtime.images.generation and runtime.images.generation.concurrency else 3 }}">
+                    <div class="form-tip">生图模型较慢时建议 2-4；如果生图服务有并发限制，可调低。</div>
+                  </div>
+                  <div class="field">
+                    <label>单张生图超时（秒）</label>
+                    <input type="number" min="10" max="600" name="image_generation_timeout_seconds" value="{{ runtime.images.generation.timeout_seconds if runtime.images and runtime.images.generation and runtime.images.generation.timeout_seconds else 180 }}">
+                  </div>
+                  <div class="field span-2">
+                    <label>整批生图最大等待（秒）</label>
+                    <input type="number" min="10" max="900" name="image_generation_total_timeout_seconds" value="{{ runtime.images.generation.total_timeout_seconds if runtime.images and runtime.images.generation and runtime.images.generation.total_timeout_seconds else 240 }}">
+                    <div class="form-tip">超过整批最大等待后，会跳过未完成图片并继续归档/评分，避免一个慢生图任务卡住全流程。</div>
+                  </div>
+                  <div class="field span-2">
+                    <label>生图 Prompt 模板（可配置）</label>
+                    <textarea class="prompt-textarea" name="image_generation_prompt_template" placeholder="留空使用系统内置插图 Prompt。可用变量：{article_title}、{section_title}、{section_excerpt}、{image_index}、{image_count}">{{ runtime.images.generation.prompt_template if runtime.images and runtime.images.generation else '' }}</textarea>
+                    <div class="prompt-help">
+                      每张图会根据文章标题与小节内容自动生成提示词。支持变量：
+                      <code>{article_title}</code>、<code>{section_title}</code>、<code>{section_excerpt}</code>、<code>{image_index}</code>、<code>{image_count}</code>、<code>{visual_brief}</code>、<code>{topic_label}</code>、<code>{visual_concept}</code>、<code>{visual_mode}</code>、<code>{visual_mode_brief}</code>、<code>{render_medium}</code>、<code>{render_medium_brief}</code>、<code>{camera_style}</code>、<code>{light_style}</code>、<code>{color_style}</code>、<code>{composition_style}</code>、<code>{texture_style}</code>。
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="config-module" id="module-wechat">
+                <div class="config-module-head">
+                  <div>
+                    <h4 class="config-module-title">微信公众号发布</h4>
+                    <p class="config-module-desc">统一配置网关地址、鉴权 Token，以及推送公众号时的图片上传上限。</p>
+                  </div>
+                  <span class="config-badge">WeChat</span>
+                </div>
+                <div class="config-grid">
+                  <div class="field">
+                    <label>微信公众号网关地址</label>
+                    <input name="wechat_gateway_base_url" value="{{ runtime.wechat_gateway.base_url if runtime.wechat_gateway is defined else 'http://106.12.11.147:18080' }}" placeholder="例如：http://106.12.11.147:18080">
+                  </div>
+                  <div class="field">
+                    <label>微信公众号网关 Token（留空则保持当前值）</label>
+                    <input name="wechat_gateway_token" placeholder="当前已配置则留空即可">
+                  </div>
+                  <div class="field span-2">
+                    <label>推送公众号单篇最多上传图片数</label>
+                    <input type="number" min="1" max="8" name="wechat_gateway_max_images" value="{{ runtime.wechat_gateway.max_images if runtime.wechat_gateway is defined and runtime.wechat_gateway.max_images else 3 }}">
+                    <div class="form-tip">微信草稿接口对标题、摘要、图片上传有约束；系统默认保留完整标题，仅超过微信 64 字限制时才截断，并上传封面与正文图片。</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="config-module" id="module-toutiao">
+                <div class="config-module-head">
+                  <div>
+                    <h4 class="config-module-title">今日头条发布</h4>
+                    <p class="config-module-desc">管理浏览器通道、登录方式、发布参数和作品声明，直接服务头条自动发布链路。</p>
+                  </div>
+                  <span class="config-badge">Toutiao</span>
+                </div>
+                <div class="config-grid">
+                  <div class="field">
+                    <label>浏览器通道</label>
+                    <input name="toutiao_channel" value="{{ runtime.toutiao.channel if runtime.toutiao is defined and runtime.toutiao.channel else 'chrome' }}" placeholder="默认 chrome">
+                  </div>
+                  <div class="field">
+                    <label>头条登录态目录</label>
+                    <input name="toutiao_browser_profile_dir" value="{{ runtime.toutiao.browser_profile_dir if runtime.toutiao is defined and runtime.toutiao.browser_profile_dir else 'C:\\ai_work\\hotrank_pipeline\\data\\browser_profiles\\toutiao' }}">
+                  </div>
+                  <div class="field">
+                    <label>登录等待秒数</label>
+                    <input type="number" min="30" max="900" name="toutiao_login_wait_seconds" value="{{ runtime.toutiao.login_wait_seconds if runtime.toutiao is defined and runtime.toutiao.login_wait_seconds else 180 }}">
+                  </div>
+                  <div class="field">
+                    <label>发布超时秒数</label>
+                    <input type="number" min="30" max="900" name="toutiao_publish_timeout_seconds" value="{{ runtime.toutiao.publish_timeout_seconds if runtime.toutiao is defined and runtime.toutiao.publish_timeout_seconds else 240 }}">
+                  </div>
+                  <div class="field">
+                    <label>头条标题最大长度</label>
+                    <input type="number" min="20" max="200" name="toutiao_title_char_limit" value="{{ runtime.toutiao.title_char_limit if runtime.toutiao is defined and runtime.toutiao.title_char_limit else 100 }}">
+                  </div>
+                  <div class="field">
+                    <label>正文最多保留内嵌图片数</label>
+                    <input type="number" min="0" max="12" name="toutiao_max_inline_images" value="{{ runtime.toutiao.max_inline_images if runtime.toutiao is defined and runtime.toutiao.max_inline_images is not none else 6 }}">
+                  </div>
+                  <div class="field">
+                    <label>发布校验列表数量</label>
+                    <input type="number" min="5" max="50" name="toutiao_verify_list_limit" value="{{ runtime.toutiao.verify_list_limit if runtime.toutiao is defined and runtime.toutiao.verify_list_limit else 20 }}">
+                  </div>
+                  <div class="field">
+                    <label>头条登录账号</label>
+                    <input name="toutiao_username" value="" placeholder="当前：{{ masked_toutiao_username if masked_toutiao_username else '未配置，可填手机号或邮箱' }}">
+                  </div>
+                  <div class="field">
+                    <label>头条登录密码</label>
+                    <input type="password" name="toutiao_password" value="" placeholder="当前：{{ '已配置则留空即可' if masked_toutiao_password else '未配置' }}">
+                  </div>
+                  <div class="field span-2">
+                    <label>默认合集名称</label>
+                    <input name="toutiao_collection_name" value="{{ runtime.toutiao.publish_options.collection_name if runtime.toutiao is defined and runtime.toutiao.publish_options is defined and runtime.toutiao.publish_options.collection_name else '这事和你有关' }}" placeholder="例如：这事和你有关">
+                  </div>
+                  <div class="field span-2">
+                    <label>默认作品声明</label>
+                    <input name="toutiao_statement_labels" value="{{ (runtime.toutiao.publish_options.statement_labels | join('，')) if runtime.toutiao is defined and runtime.toutiao.publish_options is defined and runtime.toutiao.publish_options.statement_labels else '个人观点，仅供参考' }}" placeholder="多个可用逗号分隔，例如：个人观点，仅供参考">
+                  </div>
+                </div>
+                <div class="toggle-grid" style="margin-top: 14px;">
+                  <label class="toggle-card">
+                    <input type="checkbox" name="toutiao_headless" {% if runtime.toutiao is defined and runtime.toutiao.headless %}checked{% endif %}>
+                    <span><strong>无头模式运行</strong>适合后台自动发布；首次登录或排查异常时建议先关闭。</span>
+                  </label>
+                  <label class="toggle-card">
+                    <input type="checkbox" name="toutiao_auto_password_login" {% if runtime.toutiao is not defined or runtime.toutiao.auto_password_login is not defined or runtime.toutiao.auto_password_login %}checked{% endif %}>
+                    <span><strong>优先使用已配置的账号密码自动登录</strong>如果登录态失效，先尝试自动补登录，再进入人工兜底。</span>
+                  </label>
+                  <label class="toggle-card">
+                    <input type="checkbox" name="toutiao_auto_open_login_on_publish" {% if runtime.toutiao is not defined or runtime.toutiao.auto_open_login_on_publish is not defined or runtime.toutiao.auto_open_login_on_publish %}checked{% endif %}>
+                    <span><strong>发布时若未登录自动拉起登录页</strong>减少因登录态过期导致的整轮发布失败。</span>
+                  </label>
+                  <label class="toggle-card">
+                    <input type="checkbox" name="toutiao_publish_ad_enabled" {% if runtime.toutiao is not defined or runtime.toutiao.publish_options is not defined or runtime.toutiao.publish_options.ad_enabled is not defined or runtime.toutiao.publish_options.ad_enabled %}checked{% endif %}>
+                    <span><strong>默认投放广告赚收益</strong>发布时自动按当前头条号偏好勾选广告收益相关设置。</span>
+                  </label>
+                  <label class="toggle-card">
+                    <input type="checkbox" name="toutiao_claim_exclusive" {% if runtime.toutiao is defined and runtime.toutiao.publish_options is defined and runtime.toutiao.publish_options.claim_exclusive %}checked{% endif %}>
+                    <span><strong>默认勾选头条首发</strong>适合需要强调原创首发权益的内容。</span>
+                  </label>
+                  <label class="toggle-card">
+                    <input type="checkbox" name="toutiao_publish_more_income" {% if runtime.toutiao is defined and runtime.toutiao.publish_options is defined and runtime.toutiao.publish_options.publish_more_income %}checked{% endif %}>
+                    <span><strong>默认勾选“发布得更多收益”</strong>发布阶段自动走收益相关选项。</span>
+                  </label>
+                  <label class="toggle-card" style="grid-column: 1 / -1;">
+                    <input type="checkbox" name="toutiao_disable_auto_rights_protection" {% if runtime.toutiao is not defined or runtime.toutiao.publish_options is not defined or runtime.toutiao.publish_options.disable_auto_rights_protection is not defined or runtime.toutiao.publish_options.disable_auto_rights_protection %}checked{% endif %}>
+                    <span><strong>自动尝试取消维权类勾选</strong>如果当前账号页面存在平台自动维权选项，发布时会尽量关闭，保持当前链路一致。</span>
+                  </label>
+                </div>
+                <div class="form-tip" style="margin-top: 14px;">头条发布逻辑会尽量复用当前公众号格式：标题自动截断到头条配置上限，正文优先走富文本剪贴板写入；封面会按图片数量自动选择单图 / 三图，无图则切换为无封面；同时自动设置广告、合集、作品声明，然后执行“预览并发布 / 确认发布”。若配置了头条账号密码，系统会先尝试密码登录；若仍失败，再保留手动登录等待时间。</div>
+              </div>
+
+              <div class="config-module" id="module-notify">
+                <div class="config-module-head">
+                  <div>
+                    <h4 class="config-module-title">钉钉进度通知</h4>
+                    <p class="config-module-desc">保存配置、跑流程、重新生成和自动任务收口时，统一通过钉钉把进度发给你。</p>
+                  </div>
+                  <span class="config-badge">Notify</span>
+                </div>
+                <div class="toggle-grid" style="margin-bottom: 14px;">
+                  <label class="toggle-card">
+                    <input type="checkbox" name="dingtalk_enabled" {% if runtime.notifications is defined and runtime.notifications.dingtalk is defined and runtime.notifications.dingtalk.enabled %}checked{% endif %}>
+                    <span><strong>开启钉钉进度通知</strong>配置保存成功、手动跑流程、自动任务执行结束后，都会按格式推送到当前机器人。</span>
+                  </label>
+                </div>
+                <div class="config-grid">
+                  <div class="field">
+                    <label>钉钉 Webhook</label>
+                    <input name="dingtalk_webhook" value="" placeholder="当前：{{ masked_dingtalk_webhook }}">
+                  </div>
+                  <div class="field">
+                    <label>钉钉 Secret（加签）</label>
+                    <input name="dingtalk_secret" value="" placeholder="当前：已配置则留空即可">
+                  </div>
+                  <div class="field span-2">
+                    <label>钉钉超时（秒）</label>
+                    <input type="number" min="3" max="30" name="dingtalk_timeout_seconds" value="{{ runtime.notifications.dingtalk.timeout_seconds if runtime.notifications is defined and runtime.notifications.dingtalk is defined and runtime.notifications.dingtalk.timeout_seconds else 5 }}">
+                    <div class="form-tip">Webhook / Secret 留空则保留当前值；保存后、跑流程后、重新生成后都会自动发一条进度通知。</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="config-module" id="module-auto-schedule">
+                <div class="config-module-head">
+                  <div>
+                    <h4 class="config-module-title">自动任务基础调度</h4>
+                    <p class="config-module-desc">控制自动任务是否开启、一天跑几次，以及每次先抓多少热点、生成多少篇初稿。</p>
+                  </div>
+                  <span class="config-badge">Schedule</span>
+                </div>
+                <div class="toggle-grid" style="margin-bottom: 14px;">
+                  <label class="toggle-card">
+                    <input type="checkbox" name="auto_daily_publish_enabled" {% if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.enabled %}checked{% endif %}>
+                    <span><strong>开启每日自动任务</strong>自动抓取、成稿、评分、择优发布一条链路跑完。</span>
+                  </label>
+                </div>
+                <div class="config-grid">
+                  <div class="field">
+                    <label>每天正式发文时间</label>
+                    <input name="auto_daily_publish_time" value="{{ (runtime.automation.daily_publish.schedule_times | join(',')) if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.schedule_times is defined and runtime.automation.daily_publish.schedule_times else (runtime.automation.daily_publish.schedule_time if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.schedule_time else '11:30,18:30,21:30') }}" placeholder="11:30,18:30,21:30">
+                    <div class="form-tip">这里填正式发文时间；Windows 计划任务会提前下方分钟数启动。</div>
+                  </div>
+                  <div class="field">
+                    <label>提前准备分钟数</label>
+                    <input type="number" min="0" max="180" name="auto_daily_publish_lead_minutes" value="{{ runtime.automation.daily_publish.publish_lead_minutes if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.publish_lead_minutes is defined else 30 }}">
+                    <div class="form-tip">默认提前 30 分钟抓热点、生成初稿；到正式时间再发布。</div>
+                  </div>
+                  <div class="field">
+                    <label>发布失败重试次数</label>
+                    <input type="number" min="1" max="5" name="auto_daily_publish_retry_count" value="{{ runtime.automation.daily_publish.retry_count if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.retry_count else 2 }}">
+                  </div>
+                  <div class="field">
+                    <label>自动抓取热点数量</label>
+                    <input type="number" min="1" max="100" name="auto_daily_publish_hotspot_limit" value="{{ runtime.automation.daily_publish.hotspot_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.hotspot_limit else 30 }}">
+                  </div>
+                  <div class="field">
+                    <label>自动生成初稿数量</label>
+                    <input type="number" min="1" max="30" name="auto_daily_publish_draft_limit" value="{{ runtime.automation.daily_publish.draft_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.draft_limit else 10 }}">
+                  </div>
+                </div>
+              </div>
+
+              <div class="config-module" id="module-auto-publish">
+                <div class="config-module-head">
+                  <div>
+                    <h4 class="config-module-title">自动任务渠道发布策略</h4>
+                    <p class="config-module-desc">分别控制微信公众号、今日头条每天各发多少篇，并决定是否允许同一篇稿件跨渠道重复发布。</p>
+                  </div>
+                  <span class="config-badge">Publish</span>
+                </div>
+                <div class="config-grid">
+                  <div class="field">
+                    <label>公众号每日发布数</label>
+                    <input type="number" min="0" max="10" name="auto_daily_publish_wechat_publish_limit" value="{{ runtime.automation.daily_publish.wechat_publish_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.wechat_publish_limit is defined else (runtime.automation.daily_publish.publish_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.publish_limit else 3) }}">
+                  </div>
+                  <div class="field">
+                    <label>头条每日发布数</label>
+                    <input type="number" min="0" max="10" name="auto_daily_publish_toutiao_publish_limit" value="{{ runtime.automation.daily_publish.toutiao_publish_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.toutiao_publish_limit is defined else (runtime.automation.daily_publish.publish_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.publish_limit else 3) }}">
+                  </div>
+                  <div class="field span-2">
+                    <label>公众号最低文章分</label>
+                    <input type="number" min="0" max="10" step="0.1" name="auto_daily_publish_min_publish_score" value="{{ runtime.automation.daily_publish.min_publish_score if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.min_publish_score is defined else 8.6 }}">
+                    <div class="form-tip">公众号只看文章整体可读性与发布完成度；低于这个分数的稿件只保留在编辑器里。</div>
+                  </div>
+                </div>
+                <div class="toggle-grid" style="margin-top: 14px;">
+                  <label class="toggle-card">
+                    <input type="checkbox" name="auto_daily_publish_enable_wechat" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.enable_wechat is not defined or runtime.automation.daily_publish.enable_wechat %}checked{% endif %}>
+                    <span><strong>自动推送到微信公众号</strong>勾选后，达到分数线的文章会自动进公众号草稿箱。</span>
+                  </label>
+                  <label class="toggle-card">
+                    <input type="checkbox" name="auto_daily_publish_enable_toutiao" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.enable_toutiao is not defined or runtime.automation.daily_publish.enable_toutiao %}checked{% endif %}>
+                    <span><strong>自动发布到今日头条</strong>勾选后，达到分数线的文章会自动走头条发布链路。</span>
+                  </label>
+                  <label class="toggle-card" style="grid-column: 1 / -1;">
+                    <input type="checkbox" name="auto_daily_publish_allow_cross_channel_duplicates" {% if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.allow_cross_channel_duplicates %}checked{% endif %}>
+                    <span><strong>允许同一篇稿件跨渠道重复</strong>开启后，同一篇文章可以同时发公众号和头条；关闭后会自动拆分成不同稿件，避免撞车。</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="config-module" id="module-toutiao-policy">
+                <div class="config-module-head">
+                  <div>
+                    <h4 class="config-module-title">今日头条专用选稿策略</h4>
+                    <p class="config-module-desc">头条不再沿用公众号总评分，而是单独看头条分、题材白名单、三图封面、真实热点配图和标题封面相关度。</p>
+                  </div>
+                  <span class="config-badge">Toutiao Score</span>
+                </div>
+                <div class="config-grid">
+                  <div class="field">
+                    <label>头条最低分</label>
+                    <input type="number" min="0" max="10" step="0.1" name="auto_daily_publish_min_toutiao_score" value="{{ runtime.automation.daily_publish.min_toutiao_score if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.min_toutiao_score is defined else 8.5 }}">
+                    <div class="form-tip">头条分由模型 + 本地规则混合计算，标题、题材、字数、插图都会影响。</div>
+                  </div>
+                  <div class="field">
+                    <label>头条题材白名单</label>
+                    <input name="auto_daily_publish_toutiao_topic_whitelist" value="{{ (runtime.automation.daily_publish.toutiao_topic_whitelist | join('，')) if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.toutiao_topic_whitelist else '娱乐争议，家庭教育，职场消费，安全风险，普通人利益' }}" placeholder="娱乐争议，家庭教育，职场消费，安全风险，普通人利益">
+                    <div class="form-tip">自动发布优先这些题材；不在白名单的稿件即使公众号分高，也不会发头条。</div>
+                  </div>
+                </div>
+                <div class="config-footnote">头条硬校验：少于 3 张图不发；真实热点还在用 AI 假现场图不发；封面/标题关键词明显无关不发；模型会先给 3 个头条标题候选，再由本地规则选最具体、最有冲突的一版。</div>
+              </div>
+
+              <div class="config-module" id="module-auto-preference">
+                <div class="config-module-head">
+                  <div>
+                    <h4 class="config-module-title">自动任务选题偏好与通知</h4>
+                    <p class="config-module-desc">告诉模型更偏向哪些题材，以及自动任务跑到哪个阶段要不要发钉钉提醒。</p>
+                  </div>
+                  <span class="config-badge">Preference</span>
+                </div>
+                <div class="config-grid">
+                  <div class="field span-2">
+                    <label>用户偏好关键词</label>
+                    <input name="auto_daily_publish_preference_keywords" value="{{ (runtime.automation.daily_publish.preference_keywords | join('，')) if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.preference_keywords else '' }}" placeholder="例如：AI，科技，安全，普通人，生活">
+                  </div>
+                </div>
+                <div class="toggle-grid" style="margin-top: 14px;">
+                  <label class="toggle-card">
+                    <input type="checkbox" name="auto_daily_publish_notify_on_scrape" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.notify_on_scrape is not defined or runtime.automation.daily_publish.notify_on_scrape %}checked{% endif %}>
+                    <span><strong>抓取开始发钉钉</strong>任务一启动就通知你，方便知道早晚场已经开始跑。</span>
+                  </label>
+                  <label class="toggle-card">
+                    <input type="checkbox" name="auto_daily_publish_notify_on_draft_generated" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.notify_on_draft_generated is not defined or runtime.automation.daily_publish.notify_on_draft_generated %}checked{% endif %}>
+                    <span><strong>初稿生成完成发钉钉</strong>生成 10 篇后立刻同步结果，方便你先看分数和题材。</span>
+                  </label>
+                  <label class="toggle-card" style="grid-column: 1 / -1;">
+                    <input type="checkbox" name="auto_daily_publish_notify_on_publish_finished" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.notify_on_publish_finished is not defined or runtime.automation.daily_publish.notify_on_publish_finished %}checked{% endif %}>
+                    <span><strong>最终发布完成发钉钉</strong>公众号 / 头条都跑完后给你一条汇总，直接看成功、跳过和失败数。</span>
+                  </label>
+                </div>
+                <div class="config-footnote">默认建议：午间 11:30、晚上 18:30、睡前 21:30 正式发文；系统提前 30 分钟启动抓热点、生成初稿，发布前会等到正式时间点。手动触发时，如果上一次手动任务还在跑，会先结束旧任务再覆盖启动新任务。</div>
+              </div>
+
+              <div class="config-submit-bar">
+                <div class="form-tip">建议保持公众号输出目录为按时间归档的本地盘符路径，避免稿件与图片散落在临时目录。</div>
+                <button type="submit" class="full-button" style="width: 220px;">保存当前配置</button>
+              </div>
+            </form>

@@ -7,8 +7,8 @@
     "微信"
   ],
   "board_weights": {
-    "微博": 1.0,
-    "百度": 1.0,
+    "微博": 1,
+    "百度": 1,
     "今日头条": 1.1,
     "澎湃": 1.3,
     "微信": 0.8
@@ -81,10 +81,16 @@
     "max_tokens": 4200,
     "timeout_seconds": 180,
     "retry_count": 3,
-    "retry_backoff_seconds": 2.0,
+    "retry_backoff_seconds": 2,
     "draft_generation_attempts": 3,
     "draft_prompt": "",
     "auto_polish_draft": true,
+    "anti_ai_polish_enabled": true,
+    "anti_ai_prompt_dir": "prompts/anti_ai/20260614_kejiang_zhuque",
+    "anti_ai_prompt_files": [
+      "workflow_5_tomato_formatting_upgraded.txt",
+      "workflow_6_humanization_upgraded.txt"
+    ],
     "fallback_models": [
       {
         "name": "mimo-v2.5",
@@ -142,7 +148,7 @@
   "automation": {
     "daily_publish": {
       "enabled": true,
-      "schedule_time": "07:00",
+      "schedule_time": "11:30",
       "hotspot_limit": 30,
       "draft_limit": 10,
       "publish_limit": 3,
@@ -154,10 +160,23 @@
       "notify_on_publish_finished": true,
       "preference_keywords": [],
       "schedule_times": [
-        "07:00",
-        "17:00"
+        "11:30",
+        "18:30",
+        "21:30"
       ],
-      "min_publish_score": 8.2
+      "min_publish_score": 8.2,
+      "wechat_publish_limit": 3,
+      "toutiao_publish_limit": 3,
+      "allow_cross_channel_duplicates": false,
+      "publish_lead_minutes": 30,
+      "min_toutiao_score": 8.5,
+      "toutiao_topic_whitelist": [
+        "娱乐争议",
+        "家庭教育",
+        "职场消费",
+        "安全风险",
+        "普通人利益"
+      ]
     }
   },
   "hotspot_cleanup": {

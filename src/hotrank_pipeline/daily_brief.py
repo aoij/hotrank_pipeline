@@ -131,10 +131,23 @@ def build_daily_publish_brief(
 
     if selected_drafts:
         for idx, item in enumerate(selected_drafts, start=1):
-            draft_title = str(item.get("title") or f"draft-{idx}").strip()
+            channels = [str(channel).strip() for channel in (item.get("publish_channels") or []) if str(channel).strip()]
+            is_toutiao = "今日头条" in channels
+            draft_title = str(
+                (item.get("toutiao_selected_title") if is_toutiao else "")
+                or item.get("title")
+                or f"draft-{idx}"
+            ).strip()
             matched_keyword = str(item.get("matched_keyword") or "").strip()
             created_at_text = str(item.get("created_at_text") or "").strip()
-            extra_parts = [_score_text(item.get("review_score"))]
+            extra_parts = []
+            if channels:
+                extra_parts.append(f"渠道：{'/'.join(channels)}")
+            extra_parts.append(f"公众号分：{_score_text(item.get('review_score'))}")
+            if item.get("toutiao_score") is not None:
+                extra_parts.append(f"头条分：{_score_text(item.get('toutiao_score'))}")
+            if item.get("toutiao_topic_category"):
+                extra_parts.append(f"题材：{item.get('toutiao_topic_category')}")
             if matched_keyword:
                 extra_parts.append(f"命中偏好：{matched_keyword}")
             if created_at_text:

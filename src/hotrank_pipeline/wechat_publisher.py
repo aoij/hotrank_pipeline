@@ -15,6 +15,7 @@ from PIL import Image, ImageOps
 
 from .config import Settings, load_runtime_config
 from .db import fetch_draft_by_id, fetch_recent_drafts, mark_draft_wechat_uploaded
+from .wechat_quality import evaluate_wechat_publish_quality
 
 
 WECHAT_TITLE_CHAR_LIMIT = 64
@@ -333,6 +334,16 @@ def publish_draft_to_wechat(settings: Settings, draft_id: int) -> dict[str, Any]
 
     title = _wechat_title(draft.get("title") or draft.get("canonical_title") or archive_path.stem)
     content_md = _read_markdown(archive_path)
+    runtime = load_runtime_config(settings)
+    min_publish_score = float(((runtime.get("automation") or {}).get("daily_publish") or {}).get("min_publish_score", 8.2) or 8.2)
+    quality = evaluate_wechat_publish_quality(
+        draft,
+        content_md=content_md,
+        min_score=min_publish_score,
+        require_image=True,
+    )
+    if not quality.get("ok"):
+        raise RuntimeError(f"公众号低创作度风险拦截：{quality.get('summary') or '质量闸门未通过'}")
     content_html, images, cover_path = _markdown_to_payload_html(
         content_md=content_md,
         title=title,

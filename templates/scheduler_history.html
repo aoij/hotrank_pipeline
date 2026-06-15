@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>自动任务日志 - Hotrank Pipeline</title>
+  <style>
+    :root {
+      --page-bg: #f5f7fb;
+      --surface: #ffffff;
+      --surface-soft: #f8fafc;
+      --surface-muted: #f1f5f9;
+      --border: #e5e9f0;
+      --border-strong: #d3dae6;
+      --text-main: #0f172a;
+      --text-sub: #475569;
+      --text-light: #6b7892;
+      --primary: #4f46e5;
+      --primary-hover: #4338ca;
+      --primary-soft: #eef2ff;
+      --primary-soft-2: #e0e7ff;
+      --success: #059669;
+      --warning: #d97706;
+      --danger: #dc2626;
+      --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.04);
+      --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06), 0 2px 4px rgba(15, 23, 42, 0.04);
+      --radius-xl: 20px;
+      --radius-lg: 16px;
+      --radius-md: 12px;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      background:
+        radial-gradient(1200px 600px at 0% -10%, rgba(79, 70, 229, 0.06), transparent 60%),
+        radial-gradient(900px 500px at 100% 0%, rgba(6, 182, 212, 0.05), transparent 60%),
+        var(--page-bg);
+      color: var(--text-main);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .page {
+      max-width: 1380px;
+      margin: 0 auto;
+      padding: 28px 24px 40px;
+    }
+
+    .topbar, .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xl);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 20px;
+      align-items: start;
+      padding: 28px 30px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .brand-logo {
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--primary), #06b6d4);
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .brand-logo svg { width: 22px; height: 22px; }
+    h1 { margin: 0; font-size: 28px; }
+    .subtitle {
+      margin: 6px 0 0;
+      color: var(--text-sub);
+      line-height: 1.75;
+      font-size: 14px;
+      max-width: 860px;
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .top-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: flex-end;
+    }
+
+    .top-nav-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      padding: 0 14px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.88);
+      color: var(--text-sub);
+      font-size: 12.5px;
+      font-weight: 700;
+      text-decoration: none;
+      transition: all 0.18s ease;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .top-nav-link:hover {
+      border-color: var(--primary-soft-2);
+      color: var(--primary);
+      background: #fff;
+    }
+
+    .top-nav-link.primary {
+      border-color: var(--primary-soft-2);
+      background: var(--primary-soft);
+      color: var(--primary);
+    }
+
+    .hero-link-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 0 16px;
+      border-radius: 12px;
+      border: 1px solid var(--primary-soft-2);
+      background: var(--primary-soft);
+      color: var(--primary);
+      font-size: 13px;
+      font-weight: 700;
+      text-decoration: none;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .hero-link-btn.secondary {
+      border-color: var(--border);
+      background: #fff;
+      color: var(--text-sub);
+    }
+
+    .notice {
+      margin-top: 16px;
+      padding: 12px 16px;
+      border-radius: 12px;
+      background: #ecfdf3;
+      border: 1px solid #bbf7d0;
+      color: #166534;
+      font-size: 13.5px;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 14px 16px;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .stat-label {
+      color: var(--text-light);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .stat-value {
+      margin-top: 8px;
+      font-size: 24px;
+      font-weight: 800;
+    }
+
+    .panel {
+      margin-top: 20px;
+      overflow: hidden;
+      box-shadow: var(--shadow-md);
+    }
+
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      padding: 22px 24px 0;
+    }
+
+    .section-head h2 {
+      margin: 0;
+      font-size: 22px;
+    }
+
+    .section-head p {
+      margin: 8px 0 0;
+      color: var(--text-sub);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    .section-tools {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .log-action-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 36px;
+      padding: 0 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--text-sub);
+      font-size: 12.5px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .log-action-btn.danger {
+      border-color: #fecaca;
+      color: var(--danger);
+    }
+
+    .panel-body {
+      padding: 18px 24px 24px;
+    }
+
+    .history-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .history-card {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: var(--surface-soft);
+      padding: 14px 16px;
+    }
+
+    .history-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+
+    .history-title {
+      font-weight: 800;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+      border: 1px solid var(--border);
+      color: var(--text-sub);
+      background: #fff;
+    }
+
+    .status-pill.success {
+      color: #7c3aed;
+      background: #f5f3ff;
+      border-color: #ddd6fe;
+    }
+
+    .status-pill.warning {
+      color: #9a3412;
+      background: #fff7ed;
+      border-color: #fed7aa;
+    }
+
+    .status-pill.error {
+      color: #b91c1c;
+      background: #fef2f2;
+      border-color: #fecaca;
+    }
+
+    .history-meta {
+      margin-top: 8px;
+      color: var(--text-light);
+      font-size: 12.5px;
+      line-height: 1.7;
+    }
+
+    .history-summary {
+      margin-top: 8px;
+      color: var(--text-sub);
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .history-actions {
+      margin-top: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .inline-link {
+      color: var(--primary);
+      font-size: 12.5px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .mini-danger-btn {
+      border: 1px solid #fecaca;
+      border-radius: 10px;
+      background: #fff;
+      color: var(--danger);
+      font-size: 12px;
+      font-weight: 700;
+      padding: 7px 10px;
+      cursor: pointer;
+      line-height: 1;
+    }
+
+    .empty-state {
+      border: 1px dashed var(--border-strong);
+      border-radius: 20px;
+      padding: 28px;
+      text-align: center;
+      color: var(--text-sub);
+      background: #f8fafc;
+      line-height: 1.8;
+    }
+
+    @media (max-width: 960px) {
+      .topbar, .section-head, .history-top, .history-actions {
+        grid-template-columns: 1fr;
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .stats-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="topbar">
+      <div>
+        <div class="brand">
+          <span class="brand-logo" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/></svg>
+          </span>
+          <h1>自动任务日志</h1>
+        </div>
+        <p class="subtitle">这里单独查看自动任务的完整执行历史，支持查看简报、单条删除和一键清空。首页只保留日志入口，不再堆叠长列表。</p>
+      </div>
+      <div class="top-nav">
+        <a href="/" class="top-nav-link">首页控制台</a>
+        <a href="/settings" class="top-nav-link">配置中心</a>
+        <a href="/editor" class="top-nav-link">公众号编辑器</a>
+        <a href="/scheduler-history" class="top-nav-link primary">自动任务日志</a>
+      </div>
+    </section>
+
+    {% if message %}
+    <div class="notice">{{ message }}</div>
+    {% endif %}
+
+    <section class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">总记录数</div>
+        <div class="stat-value">{{ scheduler_history_stats.total }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">成功</div>
+        <div class="stat-value">{{ scheduler_history_stats.success }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">提醒</div>
+        <div class="stat-value">{{ scheduler_history_stats.warning }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">失败</div>
+        <div class="stat-value">{{ scheduler_history_stats.error }}</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <div>
+          <h2>执行历史</h2>
+          <p>默认展示最近记录；如需回溯当天执行情况，可以直接看时间、计划发布数、实际结果和简报。</p>
+        </div>
+        <div class="section-tools">
+          {% if latest_scheduler_history %}
+          <a href="/editor?path={{ latest_scheduler_history.brief_path | urlencode }}" class="log-action-btn" {% if not latest_scheduler_history.brief_path %}style="pointer-events:none;opacity:.5;"{% endif %}>查看最新简报</a>
+          {% endif %}
+          <form method="post" action="/scheduler-history/clear" style="margin:0;">
+            <input type="hidden" name="next_url" value="/scheduler-history">
+            <button type="submit" class="log-action-btn danger" onclick="return confirm('确认清空全部自动任务执行日志吗？对应简报文件也会一起删除。');">清空全部日志</button>
+          </form>
+        </div>
+      </div>
+      <div class="panel-body">
+        {% if scheduler_history %}
+        <div class="history-list">
+          {% for item in scheduler_history %}
+          <article class="history-card">
+            <div class="history-top">
+              <div class="history-title">自动任务｜{{ item.run_at }}</div>
+              <span class="status-pill {{ item.status }}">{{ item.status }}</span>
+            </div>
+            <div class="history-meta">
+              time={{ item.schedule_time or '-' }} ｜ draft={{ item.draft_limit or '-' }} ｜ 计划 微信 {{ item.wechat_publish_limit if item.wechat_publish_limit is defined else item.publish_limit or '-' }} / 头条 {{ item.toutiao_publish_limit if item.toutiao_publish_limit is defined else item.publish_limit or '-' }} ｜ wechat={{ item.wechat_published_count if item.wechat_published_count is defined else '-' }} ｜ toutiao={{ item.toutiao_published_count if item.toutiao_published_count is defined else '-' }}
+            </div>
+            <div class="history-summary">{{ item.message }}</div>
+            <div class="history-actions">
+              {% if item.brief_path %}
+              <a href="/editor?path={{ item.brief_path | urlencode }}" target="_blank" class="inline-link">查看简报</a>
+              {% else %}
+              <span class="history-meta">未生成简报</span>
+              {% endif %}
+              <form method="post" action="/scheduler-history/{{ item.history_id }}/delete" style="margin:0;">
+                <input type="hidden" name="next_url" value="/scheduler-history">
+                <button type="submit" class="mini-danger-btn" onclick="return confirm('确认删除这条自动任务执行日志吗？对应简报文件也会一起删除。');">删除</button>
+              </form>
+            </div>
+          </article>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state">
+          还没有自动任务历史记录。<br>
+          你可以先从首页手动触发一次自动任务，或者等待计划任务执行后再回来查看。
+        </div>
+        {% endif %}
+      </div>
+    </section>
+  </div>
+</body>
+</html>

@@ -196,6 +196,13 @@ alter table article_drafts
     add column if not exists review_summary text,
     add column if not exists review_model text,
     add column if not exists reviewed_at timestamptz,
+    add column if not exists toutiao_score numeric(4,1),
+    add column if not exists toutiao_summary text,
+    add column if not exists toutiao_model text,
+    add column if not exists toutiao_reviewed_at timestamptz,
+    add column if not exists toutiao_topic_category text,
+    add column if not exists toutiao_title_candidates jsonb,
+    add column if not exists toutiao_selected_title text,
     add column if not exists wechat_uploaded_at timestamptz,
     add column if not exists wechat_media_id text,
     add column if not exists toutiao_uploaded_at timestamptz,
@@ -206,3 +213,6 @@ create index if not exists idx_article_drafts_cluster_id
 
 create index if not exists idx_article_drafts_review_score_created_at
     on article_drafts(review_score desc nulls last, created_at desc, id desc);
+
+create index if not exists idx_article_drafts_toutiao_score_created_at
+    on article_drafts(toutiao_score desc nulls last, created_at desc, id desc);

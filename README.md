@@ -165,12 +165,45 @@ python .\run.py publish-toutiao-drafts --limit 10
 说明：
 
 - 会尽量复用当前公众号排版和插图
-- 标题会按头条配置长度自动截断
+- 发布前会先改成更适合头条推荐流的短稿：标题突出具体热点和冲突，正文优先 650-950 字，一个点讲透
+- 标题会按头条配置长度自动纠偏，弱标题、残句标题、模板化标题会被拦截或回退
+- 自动任务会跳过无图、少图、弱标题和推荐流吸引力过低的稿件
 - 正文优先用富文本剪贴板方式写入 `.ProseMirror`
 - 会按图片数量自动选择单图 / 三图封面，无图则切为无封面
 - 会按配置自动设置广告、合集、作品声明等发布选项
 - 会自动执行“预览并发布 / 确认发布”
 - 首次未登录时，会自动拉起头条号登录页，登录完成后继续发布
+
+## 今日头条增长记录
+
+为了持续优化标题、封面和内容节奏，项目会把头条后台数据保存到本地：
+
+```text
+C:\ai_work\hotrank_pipeline\data\toutiao_growth\
+```
+
+常用命令：
+
+```powershell
+# 拉取头条后台数据，保存快照并追加 growth_log.md
+python .\run.py toutiao-growth-snapshot --limit 50 --note "本轮发布后复盘"
+
+# 只记录一次优化备注，不打开浏览器、不拉取后台
+python .\run.py toutiao-growth-note "标题规则优化：继续拦截泛标题和文艺谜语标题"
+```
+
+会生成：
+
+- `data\toutiao_growth\snapshots\YYYYMMDD_HHMMSS.json`：每次头条数据快照
+- `data\toutiao_growth\latest.json`：最新分析结果
+- `data\toutiao_growth\growth_log.md`：持续复盘日志
+
+自动任务发布头条后，也会自动追加一次增长快照。当前主要看这些指标：
+
+- 展现、阅读、加权 CTR、中位 CTR
+- 标题是否模板化 / 被截断 / 缺少冲突钩子
+- 插图数、封面数，是否具备三图封面素材
+- 哪类标题和题材更容易被点开，下一轮生成时继续强化
 
 ## 一键跑完整流程
 
@@ -257,35 +290,40 @@ order by s.fetched_at desc, i.rank_num asc;
 2. 发布前人工审核页
 3. 已发文记录与复盘统计
 
-## 每日自动发布兜底（Windows 计划任务）
+## 每日自动发布（Windows 计划任务主驱动）
 
-Web 页面会启动进程内调度器，但如果本机/服务在 07:00 没有运行，就无法准点触发。为避免这种情况，项目提供 Windows 计划任务兜底脚本。
+当前自动任务已改为 **Windows 计划任务主驱动**：
 
-安装或更新每天 07:00 自动任务：
+- Web 页面只负责配置、查看状态、手动触发
+- 真正的定时执行不再依赖 `8899` 页面或 Web 进程是否活着
+- 默认按配置安装三个正式发文时间点：午间 `11:30`、晚上 `18:30`、睡前 `21:30`；Windows 计划任务会提前 30 分钟启动抓热点和生成初稿
+
+安装或更新自动任务：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_daily_auto_publish_task.ps1 -At 07:00
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_daily_auto_publish_task.ps1 -At 11:30,18:30,21:30 -LeadMinutes 30
 ```
 
 计划任务实际调用：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_auto_publish.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_auto_publish.ps1 -ScheduleTime 11:30 -LeadMinutes 30
 ```
 
 脚本会执行：
 
 ```powershell
-python -X utf8 -m hotrank_pipeline.main run-daily-auto-publish --trigger windows-task
+python -X utf8 -m hotrank_pipeline.main run-daily-auto-publish --trigger windows-task-1130 --schedule-time 11:30 --publish-lead-minutes 30
 ```
 
 稳定性规则：
 
-- Web 调度器、手动按钮、CLI、Windows 计划任务共用跨进程锁：`data/scheduler/daily_publish.lock`。
+- 手动按钮、CLI、Windows 计划任务共用跨进程锁：`data/scheduler/daily_publish.lock`。
 - 同一天已有成功记录时，默认跳过，避免重复发布。
+- `11:30`、`18:30`、`21:30` 会按各自正式发文时间槽分别记账，不再互相误判。
 - 如需人工验证，可加 `--force` 强制执行一次。
-- Windows 任务启用 `StartWhenAvailable`，本机 07:00 不可用时，恢复可用后会补跑一次。
-- 运行日志写入 `data/scheduler/windows_task_yyyyMMdd.log`。
+- Windows 任务启用 `StartWhenAvailable`，本机在提前启动时间不可用时，恢复可用后会补跑一次；如果已过正式发文时间，会直接发布，不再等到第二天。
+- 运行日志写入 `data/scheduler/windows_task_yyyyMMdd.log`，按 UTF-8 无 BOM 追加，便于直接排查。
 
 卸载计划任务：
 

@@ -191,6 +191,82 @@
     }
     .chip.chip-accent strong { color: #0e7490; }
 
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .hero-link-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 0 16px;
+      border-radius: 12px;
+      border: 1px solid var(--primary-soft-2);
+      background: var(--primary-soft);
+      color: var(--primary);
+      font-size: 13px;
+      font-weight: 700;
+      box-shadow: var(--shadow-sm);
+      transition: all 0.18s ease;
+    }
+
+    .hero-link-btn:hover {
+      background: #fff;
+      border-color: var(--primary);
+      color: var(--primary-hover);
+    }
+
+    .hero-link-btn.secondary {
+      border-color: var(--border);
+      background: #fff;
+      color: var(--text-sub);
+    }
+
+    .hero-link-btn.secondary:hover {
+      border-color: var(--primary-soft-2);
+      color: var(--primary);
+      background: var(--surface-soft);
+    }
+
+    .top-nav {
+      margin-top: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .top-nav-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 40px;
+      padding: 0 14px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.8);
+      color: var(--text-sub);
+      font-size: 12.5px;
+      font-weight: 700;
+      transition: all 0.18s ease;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .top-nav-link:hover {
+      border-color: var(--primary-soft-2);
+      color: var(--primary);
+      background: #fff;
+    }
+
+    .top-nav-link.primary {
+      border-color: var(--primary-soft-2);
+      background: var(--primary-soft);
+      color: var(--primary);
+    }
+
     .hero-aside {
       background: linear-gradient(160deg, var(--surface-muted) 0%, var(--surface) 100%);
       border: 1px solid var(--border);
@@ -489,6 +565,7 @@
     }
 
     input,
+    select,
     textarea {
       width: 100%;
       padding: 11px 13px;
@@ -501,6 +578,7 @@
     }
 
     input:focus,
+    select:focus,
     textarea:focus {
       outline: none;
       border-color: #60a5fa;
@@ -535,6 +613,144 @@
       font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Microsoft YaHei UI", monospace;
       font-size: 12.5px;
       line-height: 1.65;
+    }
+
+    .section-divider {
+      margin: 18px 0 14px;
+      border: 0;
+      border-top: 1px solid var(--border);
+    }
+
+    .subsection-title {
+      margin: 0 0 10px;
+      font-size: 15px;
+      font-weight: 800;
+      color: var(--text-main);
+      letter-spacing: 0.02em;
+    }
+
+    .config-module {
+      margin-top: 14px;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .config-module:first-of-type { margin-top: 0; }
+
+    .config-module-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .config-module-title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 800;
+      color: var(--text-main);
+    }
+
+    .config-module-desc {
+      margin: 4px 0 0;
+      font-size: 12.5px;
+      line-height: 1.7;
+      color: var(--text-sub);
+    }
+
+    .config-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: var(--primary-soft);
+      border: 1px solid var(--primary-soft-2);
+      color: var(--primary-hover);
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .config-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .field {
+      min-width: 0;
+    }
+
+    .field label {
+      margin-top: 0;
+    }
+
+    .field.span-2 {
+      grid-column: 1 / -1;
+    }
+
+    .toggle-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .toggle-card {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin: 0;
+      padding: 11px 12px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text-sub);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .toggle-card input[type="checkbox"] {
+      width: auto;
+      margin: 2px 0 0;
+      flex-shrink: 0;
+    }
+
+    .toggle-card strong {
+      display: block;
+      color: var(--text-main);
+      margin-bottom: 2px;
+      font-size: 13.5px;
+    }
+
+    .config-submit-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-top: 18px;
+      padding-top: 18px;
+      border-top: 1px solid var(--border);
+    }
+
+    .config-submit-bar .form-tip {
+      margin: 0;
+      max-width: 760px;
+    }
+
+    .config-footnote {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: #eff6ff;
+      border: 1px solid #dbeafe;
+      color: #1d4ed8;
+      font-size: 12.5px;
+      line-height: 1.7;
     }
 
     .quick-command-grid {
@@ -967,10 +1183,28 @@
       border: 1px solid #ddd6fe;
     }
 
+    .score-pill.toutiao-score {
+      background: #fff1f2;
+      color: #e11d48;
+      border: 1px solid #fecdd3;
+    }
+
     .score-pill.unscored {
       background: var(--surface-muted);
       color: var(--text-mute);
       border: 1px solid var(--border);
+    }
+
+    .score-pill.quality-ok {
+      background: #ecfdf5;
+      color: #047857;
+      border: 1px solid #bbf7d0;
+    }
+
+    .score-pill.quality-risk {
+      background: #fff7ed;
+      color: #c2410c;
+      border: 1px solid #fed7aa;
     }
 
     .draft-card-mini {
@@ -1025,6 +1259,42 @@
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
+    }
+
+    .draft-card-mini .draft-actions {
+      margin-top: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .inline-link {
+      color: var(--primary);
+      font-size: 12.5px;
+      font-weight: 600;
+    }
+
+    .inline-link:hover {
+      color: var(--primary-hover);
+    }
+
+    .mini-danger-btn {
+      border: 1px solid #fecaca;
+      border-radius: 10px;
+      background: #fff;
+      color: var(--danger);
+      font-size: 12px;
+      font-weight: 700;
+      padding: 7px 10px;
+      cursor: pointer;
+      line-height: 1;
+      box-shadow: none;
+    }
+
+    .mini-danger-btn:hover {
+      background: #fef2f2;
     }
 
     .publish-chip {
@@ -1149,15 +1419,15 @@
     }
 
     .log-panel-body {
-      padding: 18px 22px 22px;
+      padding: 14px 18px 18px;
     }
 
     .log-notice {
-      margin: 0 0 14px;
-      padding: 14px 16px;
-      border-radius: 16px;
-      font-size: 14px;
-      line-height: 1.65;
+      margin: 0 0 10px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      font-size: 12.5px;
+      line-height: 1.55;
       border: 1px solid transparent;
     }
 
@@ -1169,27 +1439,28 @@
     .log-box {
       background: #0b1120;
       color: #e2e8f0;
-      border-radius: 20px;
+      border-radius: 16px;
       border: 1px solid #1e293b;
-      min-height: 520px;
-      max-height: 780px;
+      min-height: 280px;
+      max-height: 420px;
       overflow: auto;
-      padding: 10px 0;
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+      padding: 6px 0;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
     }
 
     .log-row {
       display: grid;
-      grid-template-columns: 82px 1fr;
-      gap: 12px;
-      padding: 8px 16px;
-      font-size: 13px;
-      line-height: 1.72;
+      grid-template-columns: 74px 1fr;
+      gap: 10px;
+      padding: 6px 12px;
+      font-size: 12px;
+      line-height: 1.5;
       border-bottom: 1px dashed rgba(148, 163, 184, 0.12);
     }
 
     .log-time {
       color: #94a3b8;
+      font-size: 11.5px;
       font-variant-numeric: tabular-nums;
     }
 
@@ -1206,7 +1477,7 @@
     @media (max-width: 1280px) {
       .stats-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .content-grid { grid-template-columns: 1fr; }
-      .log-box { min-height: 360px; max-height: 520px; }
+      .log-box { min-height: 240px; max-height: 360px; }
     }
 
     @media (max-width: 1080px) {
@@ -1221,6 +1492,8 @@
       .topbar { padding: 22px 18px; }
       .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .button-grid { grid-template-columns: 1fr; }
+      .config-grid,
+      .toggle-grid { grid-template-columns: 1fr; }
       .cluster-card { grid-template-columns: 1fr; }
       .cluster-time { width: fit-content; min-width: 98px; }
       .section-head,
@@ -1229,6 +1502,8 @@
       .section-tools,
       .log-toolbar,
       .pagination { justify-content: flex-start; }
+      .config-module-head,
+      .config-submit-bar { flex-direction: column; align-items: flex-start; }
     }
   </style>
 </head>
@@ -1249,6 +1524,11 @@
           <span class="chip">白名单榜单：<strong>{{ runtime.board_whitelist | length }}</strong> 个</span>
           <span class="chip">聚类分页：<strong>第 {{ cluster_pagination.page }} / {{ cluster_pagination.total_pages }} 页</strong></span>
           <span class="chip chip-accent">插图策略：<strong>{% if runtime.images and runtime.images.prefer_ai_generated %}AI生图优先{% else %}原文取图{% endif %}</strong> · {{ runtime.images.max_per_draft if runtime.images else 6 }} 张 / 篇</span>
+        </div>
+        <div class="top-nav">
+          <a href="/settings" class="top-nav-link primary">配置中心</a>
+          <a href="/editor" class="top-nav-link">公众号编辑器</a>
+          <a href="/scheduler-history" class="top-nav-link">自动任务日志</a>
         </div>
       </div>
       <aside class="hero-aside">
@@ -1469,25 +1749,30 @@
                 <span class="step-num">分</span>
                 <h3>模型审核评分</h3>
               </div>
-              <p>让模型重读已生成但未评分的初稿，按公众号发布可用度打 0-10 分；列表会优先展示高分、再展示最新。</p>
+              <p>公众号和头条现在分开打分：公众号看文章整体可读性；头条看推荐流点击、题材、三图封面和标题冲突。</p>
               <form class="inline-form action-foot" method="post" action="/actions/review-drafts">
                 <input type="number" name="limit" value="10" min="1">
-                <button type="submit" class="ghost">补评分</button>
+                <button type="submit" class="ghost">补公众号分</button>
+              </form>
+              <form class="inline-form action-foot" method="post" action="/actions/review-toutiao-drafts">
+                <input type="number" name="limit" value="10" min="1">
+                <button type="submit" class="ghost">补头条分</button>
               </form>
             </div>
 
             <div class="action-card step-extra" style="margin-top: 14px;">
               <div class="step-row">
                 <span class="step-num"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4z"/></svg></span>
-                <h3>公众号编辑器</h3>
+                <h3>生成稿件候选池</h3>
               </div>
-              <p>这里展示“已生成初稿”，按文章审核分优先排序；左侧改 Markdown，右侧实时渲染预览。</p>
+              <p>公众号候选和头条候选分开看：同一篇稿件可能公众号分高，但头条分不够、三图不足或题材不合适。</p>
               <div class="inline-form action-foot">
                 <a href="/editor" class="page-btn" style="min-width: 140px; height: 40px; border-color: var(--primary-soft-2); color: var(--primary); background: var(--primary-soft);">打开编辑器</a>
               </div>
-              {% if recent_drafts %}
+              <h4 style="margin: 14px 0 8px; font-size: 13px;">公众号候选稿件</h4>
+              {% if wechat_recent_drafts %}
               <div style="margin-top: 8px; display: grid; gap: 8px;">
-                {% for draft in recent_drafts %}
+                {% for draft in wechat_recent_drafts %}
                 <a href="/editor?draft_id={{ draft.id }}" class="draft-card-mini">
                   <div class="draft-topline">
                     <div class="draft-title">{{ draft.title }}</div>
@@ -1496,8 +1781,16 @@
                     {% else %}
                     <span class="score-pill unscored">未评分</span>
                     {% endif %}
+                    {% if draft.wechat_quality_ok %}
+                    <span class="score-pill quality-ok">公众号质检通过</span>
+                    {% else %}
+                    <span class="score-pill quality-risk" title="{{ draft.wechat_quality_summary }}">低创作风险</span>
+                    {% endif %}
                   </div>
                   <div class="draft-meta">{{ draft.created_at_text }}{% if draft.review_model %} ｜ {{ draft.review_model }}{% endif %}</div>
+                  {% if draft.wechat_quality_summary %}
+                  <div class="draft-summary">公众号质检：{{ draft.wechat_quality_summary }}</div>
+                  {% endif %}
                   {% if draft.wechat_uploaded_at_text or draft.toutiao_uploaded_at_text %}
                   <div class="publish-meta">
                     {% if draft.wechat_uploaded_at_text %}
@@ -1514,6 +1807,46 @@
                 </a>
                 {% endfor %}
               </div>
+              {% else %}
+              <div class="form-tip">暂无公众号候选稿件。</div>
+              {% endif %}
+
+              <h4 style="margin: 16px 0 8px; font-size: 13px;">今日头条候选稿件</h4>
+              {% if toutiao_recent_drafts %}
+              <div style="margin-top: 8px; display: grid; gap: 8px;">
+                {% for draft in toutiao_recent_drafts %}
+                <a href="/editor?draft_id={{ draft.id }}" class="draft-card-mini">
+                  <div class="draft-topline">
+                    <div class="draft-title">{{ draft.toutiao_selected_title or draft.title }}</div>
+                    {% if draft.toutiao_score is not none %}
+                    <span class="score-pill toutiao-score">头条分 {{ '%.1f'|format(draft.toutiao_score) }}</span>
+                    {% else %}
+                    <span class="score-pill unscored">未评头条分</span>
+                    {% endif %}
+                  </div>
+                  <div class="draft-meta">
+                    {{ draft.created_at_text }}
+                    {% if draft.toutiao_topic_category %} ｜ 题材：{{ draft.toutiao_topic_category }}{% endif %}
+                    {% if draft.review_score is not none %} ｜ 公众号分 {{ '%.1f'|format(draft.review_score) }}{% endif %}
+                  </div>
+                  {% if draft.wechat_uploaded_at_text or draft.toutiao_uploaded_at_text %}
+                  <div class="publish-meta">
+                    {% if draft.wechat_uploaded_at_text %}
+                    <span class="publish-chip wechat">公众号已上传</span>
+                    {% endif %}
+                    {% if draft.toutiao_uploaded_at_text %}
+                    <span class="publish-chip toutiao">头条已发布</span>
+                    {% endif %}
+                  </div>
+                  {% endif %}
+                  {% if draft.toutiao_summary %}
+                  <div class="draft-summary">{{ draft.toutiao_summary }}</div>
+                  {% endif %}
+                </a>
+                {% endfor %}
+              </div>
+              {% else %}
+              <div class="form-tip">暂无头条候选稿件。可以先点“补头条分”。</div>
               {% endif %}
             </div>
 
@@ -1522,10 +1855,20 @@
                 <span class="step-num">定</span>
                 <h3>每日自动抓取与发布</h3>
               </div>
-              <p>每天 {{ scheduler_state.time }} 自动抓取 {{ scheduler_state.hotspot_limit }} 个热点候选、生成 {{ scheduler_state.draft_limit }} 篇初稿、挑选 {{ scheduler_state.publish_limit }} 篇高分稿发布到已启用渠道；抓取开始、初稿生成完成、最终发布完成都会发钉钉。</p>
+              <p>每天 {{ scheduler_state.time }} 自动抓取 {{ scheduler_state.hotspot_limit }} 个热点候选、生成 {{ scheduler_state.draft_limit }} 篇初稿，再按分数择优发布到各渠道：公众号 {{ scheduler_state.wechat_publish_limit if scheduler_state.wechat_publish_limit is defined else scheduler_state.publish_limit }} 篇、头条 {{ scheduler_state.toutiao_publish_limit if scheduler_state.toutiao_publish_limit is defined else scheduler_state.publish_limit }} 篇。</p>
               <div class="form-tip" style="margin: 10px 0 12px 0;">
-                调度：{{ '已启用' if scheduler_state.enabled else '未启用' }}｜线程：{{ '运行中' if scheduler_state.running else '待命' }}｜重试：{{ scheduler_state.retry_count }} 次<br>
+                调度：{{ '已启用' if scheduler_state.enabled else '未启用' }}｜执行方式：Windows 计划任务｜重试：{{ scheduler_state.retry_count }} 次<br>
+                计划任务：{% if scheduler_state.windows_task and scheduler_state.windows_task.exists %}已安装{% else %}未安装{% endif %}{% if scheduler_state.windows_task and scheduler_state.windows_task.status %}｜状态：{{ scheduler_state.windows_task.status }}{% endif %}{% if scheduler_state.windows_task and scheduler_state.windows_task.next_run_time %}｜下次运行：{{ scheduler_state.windows_task.next_run_time }}{% endif %}{% if scheduler_state.windows_task and scheduler_state.windows_task.last_result %}｜上次结果：{{ scheduler_state.windows_task.last_result }}{% endif %}<br>
+                {% if scheduler_state.windows_task and scheduler_state.windows_task.tasks %}
+                任务明细：
+                {% for task in scheduler_state.windows_task.tasks %}
+                <span class="num">{{ task.task_name }}</span>{% if task.status %}（{{ task.status }}）{% endif %}{% if task.next_run_time %}｜下次 {{ task.next_run_time }}{% endif %}{% if task.last_run_time %}｜上次 {{ task.last_run_time }}{% endif %}{% if task.last_result %}｜结果 {{ task.last_result }}{% endif %}{% if not loop.last %}<br>{% endif %}
+                {% endfor %}<br>
+                {% endif %}
                 渠道：{{ '公众号' if scheduler_state.enable_wechat else '' }}{% if scheduler_state.enable_wechat and scheduler_state.enable_toutiao %} + {% endif %}{{ '头条' if scheduler_state.enable_toutiao else '' }}{% if not scheduler_state.enable_wechat and not scheduler_state.enable_toutiao %}未启用{% endif %}<br>
+                发布计划：公众号 {{ scheduler_state.wechat_publish_limit if scheduler_state.wechat_publish_limit is defined else scheduler_state.publish_limit }} 篇｜头条 {{ scheduler_state.toutiao_publish_limit if scheduler_state.toutiao_publish_limit is defined else scheduler_state.publish_limit }} 篇｜跨渠道重复：{{ '允许' if scheduler_state.allow_cross_channel_duplicates else '不允许' }}<br>
+                分数线：公众号 {{ '%.1f'|format(scheduler_state.min_publish_score if scheduler_state.min_publish_score is defined else 8.2) }}｜头条 {{ '%.1f'|format(scheduler_state.min_toutiao_score if scheduler_state.min_toutiao_score is defined else 8.5) }}<br>
+                头条题材：{{ scheduler_state.toutiao_topic_whitelist | join(' / ') if scheduler_state.toutiao_topic_whitelist is defined and scheduler_state.toutiao_topic_whitelist else '默认白名单' }}<br>
                 偏好关键词：{{ scheduler_state.preference_keywords | join(' / ') if scheduler_state.preference_keywords else '未设置' }}<br>
                 最近一次：{{ scheduler_state.last_run_at or '暂无' }}{% if scheduler_state.last_status %}｜{{ scheduler_state.last_status }}{% endif %}{% if scheduler_state.last_message %}<br>{{ scheduler_state.last_message }}{% endif %}
               </div>
@@ -1539,25 +1882,10 @@
               <form class="action-foot" method="post" action="/actions/auto-daily-publish-run-now">
                 <button type="submit" class="secondary full-button">立即手动跑一次自动任务</button>
               </form>
-              {% if scheduler_history %}
-              <div style="margin-top: 12px; display: grid; gap: 8px;">
-                {% for item in scheduler_history %}
-                <div class="draft-card-mini" style="text-decoration:none;">
-                  <div class="draft-topline">
-                    <div class="draft-title">自动任务｜{{ item.run_at }}</div>
-                    <span class="score-pill {% if item.status == 'success' %}article-score{% else %}unscored{% endif %}">{{ item.status }}</span>
-                  </div>
-                  <div class="draft-meta">time={{ item.schedule_time or '-' }}｜draft={{ item.draft_limit or '-' }}｜publish={{ item.publish_limit or '-' }}｜wechat={{ item.wechat_published_count if item.wechat_published_count is defined else '-' }}｜toutiao={{ item.toutiao_published_count if item.toutiao_published_count is defined else '-' }}</div>
-                  <div class="draft-summary">{{ item.message }}</div>
-                  {% if item.brief_path %}
-                  <div class="draft-meta" style="margin-top:6px;">
-                    <a href="/editor?path={{ item.brief_path | urlencode }}" target="_blank">查看简报</a>
-                  </div>
-                  {% endif %}
-                </div>
-                {% endfor %}
+              <div class="form-tip" style="margin-top: 12px;">
+                自动任务执行日志已独立到单独页面，支持查看完整历史、单条删除、批量清空。<br>
+                <a href="/scheduler-history" class="inline-link">打开自动任务日志页</a>
               </div>
-              {% endif %}
             </div>
           </div>
         </div>
@@ -1676,303 +2004,6 @@
           </div>
         </div>
 
-        <details class="panel panel-collapsible sidebar-panel">
-          <summary class="panel-header panel-summary">
-            <div>
-              <h2 class="panel-title">模型与输出配置</h2>
-              <p class="panel-desc" style="margin:6px 0 0;">需要时再展开调整模型、目录、白名单与插图策略。</p>
-            </div>
-          </summary>
-          <div class="panel-body">
-            <form method="post" action="/config">
-              <label>LLM Base URL</label>
-              <input name="llm_base_url" value="{{ runtime.llm.base_url }}">
-
-              <label>LLM 模型</label>
-              <input name="llm_model" value="{{ runtime.llm.model }}">
-
-              <label>推理强度</label>
-              <input name="llm_reasoning_effort" value="{{ runtime.llm.reasoning_effort if runtime.llm.reasoning_effort is defined else 'xhigh' }}" placeholder="例如：xhigh / high / medium / low">
-              <div class="form-tip">OpenAI 兼容网关支持时会传给 <code>reasoning_effort</code>；不支持的模型会按网关兼容策略处理。</div>
-
-              <label>
-                <input type="checkbox" name="llm_disable_env_proxy" {% if runtime.llm.disable_env_proxy is not defined or runtime.llm.disable_env_proxy %}checked{% endif %} style="width:auto; margin-right:8px;">
-                成稿模型请求不走系统代理
-              </label>
-              <div class="form-tip">开启后，生成初稿、AI 自检改稿、文章评分都会忽略 Windows 全局 HTTP(S)_PROXY，避免小米 Mimo 等国内模型出现 SSL EOF。</div>
-
-              <label>LLM API Key（留空则保持当前值）</label>
-              <input name="llm_api_key" placeholder="当前：{{ masked_api_key }}">
-
-              <label>生成文章 Prompt（可配置）</label>
-              <textarea class="prompt-textarea" name="llm_draft_prompt" placeholder="留空使用系统内置公众号主笔 Prompt。可用变量：{topic}、{cluster_summary}、{item_count}、{sources}、{editorial_plan_name}、{editorial_tone}、{opening_strategy}、{section_suggestions}、{purpose}、{expected_words}、{timeliness}">{{ runtime.llm.draft_prompt or '' }}</textarea>
-              <div class="prompt-help">
-                留空会使用默认公众号 Prompt；填写后会完全按这里生成。支持变量：
-                <code>{topic}</code>、<code>{cluster_summary}</code>、<code>{item_count}</code>、<code>{sources}</code>、<code>{editorial_plan_name}</code>、<code>{editorial_tone}</code>、<code>{opening_strategy}</code>、<code>{section_suggestions}</code>、<code>{purpose}</code>、<code>{expected_words}</code>、<code>{timeliness}</code>。
-              </div>
-
-              <label>稿件归档目录</label>
-              <input name="draft_output_dir" value="{{ runtime.draft_output_dir }}">
-
-              <label>榜单白名单（逗号分隔）</label>
-              <textarea name="board_whitelist">{{ runtime.board_whitelist | join(', ') }}</textarea>
-              <div class="form-tip">留空表示所有已入库榜单都参与聚类；多来源接入后建议保留：微博、知乎、百度、B站、36氪、虎嗅、掘金、V2EX、HelloGitHub、澎湃、微信。</div>
-
-              <label>
-                <input type="checkbox" name="content_sources_include_tophub" {% if content_sources.include_tophub %}checked{% endif %} style="width:auto; margin-right:8px;">
-                抓取 TopHub 新闻页
-              </label>
-
-              <label>
-                <input type="checkbox" name="content_sources_enabled" {% if content_sources.enabled %}checked{% endif %} style="width:auto; margin-right:8px;">
-                启用扩展内容源（DailyHot / RSSHub / RSS）
-              </label>
-
-              <label>DailyHot API 地址</label>
-              <input name="dailyhot_base_url" value="{{ content_sources.dailyhot_base_url or '' }}" placeholder="例如：http://127.0.0.1:6688 或 https://hot-api.xxx.com">
-              <div class="form-tip">可接入自建 DailyHotApi。系统会按下面的 route 拼接请求，例如 /weibo、/zhihu、/bilibili。</div>
-
-              <label>DailyHot Routes（逗号或换行分隔）</label>
-              <textarea name="dailyhot_routes">{{ content_sources.dailyhot_routes | join('\n') }}</textarea>
-
-              <label>RSS / RSSHub 源（每行一个，格式：名称|URL）</label>
-              <textarea name="rss_feeds" placeholder="V2EX 最热|https://rsshub.app/v2ex/topics/hot&#10;少数派|https://rsshub.app/sspai/index">{{ rss_feeds_text }}</textarea>
-              <div class="form-tip">适合接 RSSHub、垂直站 RSS、行业信息源。入库后复用现有聚类、补抓、成稿链路。</div>
-
-              <label>单个内容源最多抓取条目数</label>
-              <input type="number" min="1" max="100" name="content_sources_max_items" value="{{ content_sources.max_items_per_board or 30 }}">
-
-              <label>
-                <input type="checkbox" name="content_filter_exclude_newslike" {% if runtime.content_filter is not defined or runtime.content_filter.exclude_newslike %}checked{% endif %} style="width:auto; margin-right:8px;">
-                过滤新闻快讯 / 通报公告类选题
-              </label>
-              <div class="form-tip">开启后，补抓和成稿阶段会跳过偏新闻播报、官方通报、政策公告、硬新闻快讯类内容，优先保留适合公众号二创解读的选题。</div>
-
-              <label>旧热点自动清理</label>
-              <label>
-                <input type="checkbox" name="hotspot_cleanup_enabled" {% if runtime.hotspot_cleanup is not defined or runtime.hotspot_cleanup.enabled %}checked{% endif %} style="width:auto; margin-right:8px;">
-                一键执行前自动删除太久的热点缓存
-              </label>
-              <label>热点保留时长（小时）</label>
-              <input type="number" min="1" max="720" name="hotspot_cleanup_retention_hours" value="{{ runtime.hotspot_cleanup.retention_hours if runtime.hotspot_cleanup is defined and runtime.hotspot_cleanup.retention_hours else 48 }}">
-              <div class="form-tip">只清理热点抓取批次和未成稿聚类；已生成文章的关联聚类会保留。</div>
-
-              <label>每篇稿件最多插图数</label>
-              <input type="number" min="1" max="12" name="image_max_per_draft" value="{{ runtime.images.max_per_draft if runtime.images else 6 }}">
-
-              <label>单个来源最多取图数</label>
-              <input type="number" min="1" max="8" name="image_max_per_source" value="{{ runtime.images.max_per_source if runtime.images else 3 }}">
-
-              <label>
-                <input type="checkbox" name="image_prefer_ai_generated" {% if runtime.images is not defined or runtime.images.prefer_ai_generated %}checked{% endif %} style="width:auto; margin-right:8px;">
-                优先使用 AI 生图
-              </label>
-
-              <label>
-                <input type="checkbox" name="image_fallback_to_source" {% if runtime.images is not defined or runtime.images.fallback_to_source is not defined or runtime.images.fallback_to_source %}checked{% endif %} style="width:auto; margin-right:8px;">
-                生图失败后回退原文取图
-              </label>
-
-              <label>
-                <input type="checkbox" name="image_fallback_to_web_search" {% if runtime.images is not defined or runtime.images.fallback_to_web_search is not defined or runtime.images.fallback_to_web_search %}checked{% endif %} style="width:auto; margin-right:8px;">
-                原文无图时联网搜图兜底
-              </label>
-              <div class="form-tip">插图顺序：AI 生图优先 → 原文取图 → 联网搜图。联网搜图会过滤新华社、央视、logo、水印、二维码等明显不适合图片。</div>
-
-              <label>生图 API 地址</label>
-              <input name="image_generation_base_url" value="{{ runtime.images.generation.base_url if runtime.images and runtime.images.generation else '' }}" placeholder="例如：https://xxx/v1 或 https://xxx/v1/images/generations">
-
-              <label>生图模型</label>
-              <input name="image_generation_model" value="{{ runtime.images.generation.model if runtime.images and runtime.images.generation else '' }}" placeholder="例如：gpt-image-1 / flux / 即梦模型名">
-
-              <label>生图 API Key（留空则保持当前值）</label>
-              <input name="image_generation_api_key" placeholder="当前：{{ masked_image_api_key }}">
-
-              <label>生图尺寸</label>
-              <input name="image_generation_size" value="{{ runtime.images.generation.size if runtime.images and runtime.images.generation and runtime.images.generation.size else '1024x1024' }}">
-
-              <label>生图并发数</label>
-              <input type="number" min="1" max="12" name="image_generation_concurrency" value="{{ runtime.images.generation.concurrency if runtime.images and runtime.images.generation and runtime.images.generation.concurrency else 3 }}">
-              <div class="form-tip">生图模型较慢时建议 2-4；如果生图服务有并发限制，可调低。</div>
-
-              <label>单张生图超时（秒）</label>
-              <input type="number" min="10" max="600" name="image_generation_timeout_seconds" value="{{ runtime.images.generation.timeout_seconds if runtime.images and runtime.images.generation and runtime.images.generation.timeout_seconds else 180 }}">
-
-              <label>整批生图最大等待（秒）</label>
-              <input type="number" min="10" max="900" name="image_generation_total_timeout_seconds" value="{{ runtime.images.generation.total_timeout_seconds if runtime.images and runtime.images.generation and runtime.images.generation.total_timeout_seconds else 240 }}">
-              <div class="form-tip">超过整批最大等待后，会跳过未完成图片并继续归档/评分，避免一个慢生图任务卡住全流程。</div>
-
-              <label>生图 Prompt 模板（可配置）</label>
-              <textarea class="prompt-textarea" name="image_generation_prompt_template" placeholder="留空使用系统内置插图 Prompt。可用变量：{article_title}、{section_title}、{section_excerpt}、{image_index}、{image_count}">{{ runtime.images.generation.prompt_template if runtime.images and runtime.images.generation else '' }}</textarea>
-              <div class="prompt-help">
-                每张图会根据文章标题与小节内容自动生成提示词。支持变量：
-                <code>{article_title}</code>、<code>{section_title}</code>、<code>{section_excerpt}</code>、<code>{image_index}</code>、<code>{image_count}</code>。
-              </div>
-
-
-              <label>微信公众号网关地址</label>
-              <input name="wechat_gateway_base_url" value="{{ runtime.wechat_gateway.base_url if runtime.wechat_gateway is defined else 'http://106.12.11.147:18080' }}" placeholder="例如：http://106.12.11.147:18080">
-
-              <label>微信公众号网关 Token（留空则保持当前值）</label>
-              <input name="wechat_gateway_token" placeholder="当前已配置则留空即可">
-
-              <label>推送公众号单篇最多上传图片数</label>
-              <input type="number" min="1" max="8" name="wechat_gateway_max_images" value="{{ runtime.wechat_gateway.max_images if runtime.wechat_gateway is defined and runtime.wechat_gateway.max_images else 3 }}">
-              <div class="form-tip">微信草稿接口对标题、摘要、图片上传有约束；系统默认保留完整标题，仅超过微信 64 字限制时才截断，并上传封面与正文图片。</div>
-
-              <hr class="section-divider">
-              <h3 class="subsection-title">今日头条直接发布</h3>
-
-              <label>浏览器通道</label>
-              <input name="toutiao_channel" value="{{ runtime.toutiao.channel if runtime.toutiao is defined and runtime.toutiao.channel else 'chrome' }}" placeholder="默认 chrome">
-
-              <label>头条登录态目录</label>
-              <input name="toutiao_browser_profile_dir" value="{{ runtime.toutiao.browser_profile_dir if runtime.toutiao is defined and runtime.toutiao.browser_profile_dir else 'C:\\ai_work\\hotrank_pipeline\\data\\browser_profiles\\toutiao' }}">
-
-              <label>
-                <input type="checkbox" name="toutiao_headless" {% if runtime.toutiao is defined and runtime.toutiao.headless %}checked{% endif %} style="width:auto; margin-right:8px;">
-                无头模式运行（不推荐首次登录时开启）
-              </label>
-
-              <label>登录等待秒数</label>
-              <input type="number" min="30" max="900" name="toutiao_login_wait_seconds" value="{{ runtime.toutiao.login_wait_seconds if runtime.toutiao is defined and runtime.toutiao.login_wait_seconds else 180 }}">
-
-              <label>发布超时秒数</label>
-              <input type="number" min="30" max="900" name="toutiao_publish_timeout_seconds" value="{{ runtime.toutiao.publish_timeout_seconds if runtime.toutiao is defined and runtime.toutiao.publish_timeout_seconds else 240 }}">
-
-              <label>头条标题最大长度</label>
-              <input type="number" min="20" max="200" name="toutiao_title_char_limit" value="{{ runtime.toutiao.title_char_limit if runtime.toutiao is defined and runtime.toutiao.title_char_limit else 100 }}">
-
-              <label>正文最多保留内嵌图片数</label>
-              <input type="number" min="0" max="12" name="toutiao_max_inline_images" value="{{ runtime.toutiao.max_inline_images if runtime.toutiao is defined and runtime.toutiao.max_inline_images is not none else 6 }}">
-
-              <label>发布校验列表数量</label>
-              <input type="number" min="5" max="50" name="toutiao_verify_list_limit" value="{{ runtime.toutiao.verify_list_limit if runtime.toutiao is defined and runtime.toutiao.verify_list_limit else 20 }}">
-
-              <label>头条登录账号</label>
-              <input name="toutiao_username" value="" placeholder="当前：{{ masked_toutiao_username if masked_toutiao_username else '未配置，可填手机号或邮箱' }}">
-
-              <label>头条登录密码</label>
-              <input type="password" name="toutiao_password" value="" placeholder="当前：{{ '已配置则留空即可' if masked_toutiao_password else '未配置' }}">
-
-              <label>
-                <input type="checkbox" name="toutiao_auto_password_login" {% if runtime.toutiao is not defined or runtime.toutiao.auto_password_login is not defined or runtime.toutiao.auto_password_login %}checked{% endif %} style="width:auto; margin-right:8px;">
-                优先使用已配置的账号密码自动登录
-              </label>
-
-              <label>
-                <input type="checkbox" name="toutiao_auto_open_login_on_publish" {% if runtime.toutiao is not defined or runtime.toutiao.auto_open_login_on_publish is not defined or runtime.toutiao.auto_open_login_on_publish %}checked{% endif %} style="width:auto; margin-right:8px;">
-                发布时若未登录，自动拉起头条号登录页
-              </label>
-              <label>
-                <input type="checkbox" name="toutiao_publish_ad_enabled" {% if runtime.toutiao is not defined or runtime.toutiao.publish_options is not defined or runtime.toutiao.publish_options.ad_enabled is not defined or runtime.toutiao.publish_options.ad_enabled %}checked{% endif %} style="width:auto; margin-right:8px;">
-                默认投放广告赚收益
-              </label>
-
-              <label>
-                <input type="checkbox" name="toutiao_claim_exclusive" {% if runtime.toutiao is defined and runtime.toutiao.publish_options is defined and runtime.toutiao.publish_options.claim_exclusive %}checked{% endif %} style="width:auto; margin-right:8px;">
-                默认勾选头条首发
-              </label>
-
-              <label>
-                <input type="checkbox" name="toutiao_publish_more_income" {% if runtime.toutiao is defined and runtime.toutiao.publish_options is defined and runtime.toutiao.publish_options.publish_more_income %}checked{% endif %} style="width:auto; margin-right:8px;">
-                默认勾选“发布得更多收益”
-              </label>
-
-              <label>
-                <input type="checkbox" name="toutiao_disable_auto_rights_protection" {% if runtime.toutiao is not defined or runtime.toutiao.publish_options is not defined or runtime.toutiao.publish_options.disable_auto_rights_protection is not defined or runtime.toutiao.publish_options.disable_auto_rights_protection %}checked{% endif %} style="width:auto; margin-right:8px;">
-                自动尝试取消维权类勾选（若当前账号页面存在）
-              </label>
-
-              <label>默认合集名称</label>
-              <input name="toutiao_collection_name" value="{{ runtime.toutiao.publish_options.collection_name if runtime.toutiao is defined and runtime.toutiao.publish_options is defined and runtime.toutiao.publish_options.collection_name else '这事和你有关' }}" placeholder="例如：这事和你有关">
-
-              <label>默认作品声明</label>
-              <input name="toutiao_statement_labels" value="{{ (runtime.toutiao.publish_options.statement_labels | join('，')) if runtime.toutiao is defined and runtime.toutiao.publish_options is defined and runtime.toutiao.publish_options.statement_labels else '个人观点，仅供参考' }}" placeholder="多个可用逗号分隔，例如：个人观点，仅供参考">
-
-              <div class="form-tip">头条发布逻辑会尽量复用当前公众号格式：标题自动截断到头条配置上限，正文优先走富文本剪贴板写入；封面会按图片数量自动选择单图 / 三图，无图则切换为无封面；同时自动设置广告、合集、作品声明，然后执行“预览并发布 / 确认发布”。若配置了头条账号密码，系统会先尝试密码登录；若仍失败，再保留手动登录等待时间。</div>
-
-              <hr class="section-divider">
-              <h3 class="subsection-title">钉钉进度通知</h3>
-
-              <label>
-                <input type="checkbox" name="dingtalk_enabled" {% if runtime.notifications is defined and runtime.notifications.dingtalk is defined and runtime.notifications.dingtalk.enabled %}checked{% endif %} style="width:auto; margin-right:8px;">
-                开启钉钉进度通知
-              </label>
-
-              <label>钉钉 Webhook</label>
-              <input name="dingtalk_webhook" value="" placeholder="当前：{{ masked_dingtalk_webhook }}">
-
-              <label>钉钉 Secret（加签）</label>
-              <input name="dingtalk_secret" value="" placeholder="当前：已配置则留空即可">
-
-              <label>钉钉超时（秒）</label>
-              <input type="number" min="3" max="30" name="dingtalk_timeout_seconds" value="{{ runtime.notifications.dingtalk.timeout_seconds if runtime.notifications is defined and runtime.notifications.dingtalk is defined and runtime.notifications.dingtalk.timeout_seconds else 5 }}">
-              <div class="form-tip">保存后、跑流程后、重新生成后都会自动发一条进度通知；Webhook / Secret 留空则保留当前值。</div>
-
-              <hr class="section-divider">
-              <h3 class="subsection-title">每日自动任务</h3>
-
-              <label>
-                <input type="checkbox" name="auto_daily_publish_enabled" {% if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.enabled %}checked{% endif %} style="width:auto; margin-right:8px;">
-                开启每日自动抓取 / 成稿 / 发布
-              </label>
-
-              <label>每天执行时间</label>
-              <input name="auto_daily_publish_time" value="{{ (runtime.automation.daily_publish.schedule_times | join(',')) if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.schedule_times is defined and runtime.automation.daily_publish.schedule_times else (runtime.automation.daily_publish.schedule_time if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.schedule_time else '07:00,17:00') }}" placeholder="07:00,17:00">
-
-              <label>自动抓取热点数量</label>
-              <input type="number" min="1" max="100" name="auto_daily_publish_hotspot_limit" value="{{ runtime.automation.daily_publish.hotspot_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.hotspot_limit else 30 }}">
-
-              <label>自动生成初稿数量</label>
-              <input type="number" min="1" max="30" name="auto_daily_publish_draft_limit" value="{{ runtime.automation.daily_publish.draft_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.draft_limit else 5 }}">
-
-              <label>自动择优发布数量</label>
-              <input type="number" min="1" max="10" name="auto_daily_publish_publish_limit" value="{{ runtime.automation.daily_publish.publish_limit if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.publish_limit else 3 }}">
-
-              <label>自动发布最低文章分</label>
-              <input type="number" min="0" max="10" step="0.1" name="auto_daily_publish_min_publish_score" value="{{ runtime.automation.daily_publish.min_publish_score if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.min_publish_score is defined else 8.6 }}">
-              <div class="form-tip">低于这个分数、标题超过 30 字或命中模板标题的稿件，只保留在编辑器里，不自动发布。</div>
-
-              <label>发布失败重试次数</label>
-              <input type="number" min="1" max="5" name="auto_daily_publish_retry_count" value="{{ runtime.automation.daily_publish.retry_count if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.retry_count else 2 }}">
-
-              <label>
-                <input type="checkbox" name="auto_daily_publish_enable_wechat" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.enable_wechat is not defined or runtime.automation.daily_publish.enable_wechat %}checked{% endif %} style="width:auto; margin-right:8px;">
-                自动推送到微信公众号
-              </label>
-
-              <label>
-                <input type="checkbox" name="auto_daily_publish_enable_toutiao" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.enable_toutiao is not defined or runtime.automation.daily_publish.enable_toutiao %}checked{% endif %} style="width:auto; margin-right:8px;">
-                自动发布到今日头条
-              </label>
-
-              <label>用户偏好关键词</label>
-              <input name="auto_daily_publish_preference_keywords" value="{{ (runtime.automation.daily_publish.preference_keywords | join('，')) if runtime.automation is defined and runtime.automation.daily_publish is defined and runtime.automation.daily_publish.preference_keywords else '' }}" placeholder="例如：AI，科技，安全，普通人，生活">
-
-              <label>
-                <input type="checkbox" name="auto_daily_publish_notify_on_scrape" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.notify_on_scrape is not defined or runtime.automation.daily_publish.notify_on_scrape %}checked{% endif %} style="width:auto; margin-right:8px;">
-                抓取开始时发钉钉
-              </label>
-
-              <label>
-                <input type="checkbox" name="auto_daily_publish_notify_on_draft_generated" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.notify_on_draft_generated is not defined or runtime.automation.daily_publish.notify_on_draft_generated %}checked{% endif %} style="width:auto; margin-right:8px;">
-                初稿生成完成时发钉钉
-              </label>
-
-              <label>
-                <input type="checkbox" name="auto_daily_publish_notify_on_publish_finished" {% if runtime.automation is not defined or runtime.automation.daily_publish is not defined or runtime.automation.daily_publish.notify_on_publish_finished is not defined or runtime.automation.daily_publish.notify_on_publish_finished %}checked{% endif %} style="width:auto; margin-right:8px;">
-                最终发布完成时发钉钉
-              </label>
-              <div class="form-tip">默认每天早上 7 点和下午 5 点各跑一次：抓取 30 个热点，生成 5 篇初稿，按评分从高到低挑 3 篇；已发布过的热点不会重复发布。你现在可以再限定偏好关键词、控制只发公众号/只发头条，并为失败发布开启自动重试。</div>
-
-              <div style="margin-top: 16px;">
-                <button type="submit" class="full-button">保存当前配置</button>
-              </div>
-            </form>
-            <div class="form-tip">建议保持公众号输出目录为按时间归档的本地盘符路径，避免稿件与图片散落在临时目录。</div>
-          </div>
-        </details>
       </aside>
     </section>
   </div>

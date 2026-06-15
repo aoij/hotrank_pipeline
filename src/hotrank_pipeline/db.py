@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from pathlib import Path
@@ -26,6 +27,32 @@ def init_db(settings: Settings) -> None:
     with get_connection(settings) as conn:
         with conn.cursor() as cur:
             cur.execute(sql)
+        conn.commit()
+
+
+def ensure_channel_columns(settings: Settings) -> None:
+    """Lightweight migration for channel-specific scoring fields."""
+
+    with get_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                alter table article_drafts
+                    add column if not exists toutiao_score numeric(4,1),
+                    add column if not exists toutiao_summary text,
+                    add column if not exists toutiao_model text,
+                    add column if not exists toutiao_reviewed_at timestamptz,
+                    add column if not exists toutiao_topic_category text,
+                    add column if not exists toutiao_title_candidates jsonb,
+                    add column if not exists toutiao_selected_title text
+                """
+            )
+            cur.execute(
+                """
+                create index if not exists idx_article_drafts_toutiao_score_created_at
+                    on article_drafts(toutiao_score desc nulls last, created_at desc, id desc)
+                """
+            )
         conn.commit()
 
 
@@ -399,6 +426,7 @@ def persist_article_fetch_result(settings: Settings, result: ArticleFetchResult)
 
 
 def fetch_recent_drafts(settings: Settings, limit: int = 20) -> list[dict]:
+    ensure_channel_columns(settings)
     with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -413,19 +441,38 @@ def fetch_recent_drafts(settings: Settings, limit: int = 20) -> list[dict]:
                     d.review_summary,
                     d.review_model,
                     d.reviewed_at,
+                    d.toutiao_score,
+                    d.toutiao_summary,
+                    d.toutiao_model,
+                    d.toutiao_reviewed_at,
+                    d.toutiao_topic_category,
+                    d.toutiao_title_candidates,
+                    d.toutiao_selected_title,
                     d.wechat_uploaded_at,
                     d.wechat_media_id,
                     d.toutiao_uploaded_at,
                     d.toutiao_article_id,
                     d.created_at,
                     tc.canonical_title,
+                    tc.item_count,
+                    (
+                        select count(*)
+                        from topic_cluster_items tci2
+                        join article_sources a2 on a2.board_snapshot_item_id = tci2.board_snapshot_item_id
+                        where tci2.cluster_id = d.cluster_id
+                          and a2.fetch_status = 'fetched'
+                          and length(coalesce(a2.content_text, '')) > 80
+                    ) as fetched_source_count,
                     to_char(d.reviewed_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as reviewed_at_text,
+                    to_char(d.toutiao_reviewed_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as toutiao_reviewed_at_text,
                     to_char(d.wechat_uploaded_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as wechat_uploaded_at_text,
                     to_char(d.toutiao_uploaded_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as toutiao_uploaded_at_text,
                     to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
                 from article_drafts d
                 join topic_clusters tc on tc.id = d.cluster_id
-                order by d.review_score desc nulls last, d.created_at desc, d.id desc
+                order by greatest(coalesce(d.review_score, 0), coalesce(d.toutiao_score, 0)) desc,
+                         d.created_at desc,
+                         d.id desc
                 limit %s
                 """,
                 (limit,),
@@ -434,6 +481,7 @@ def fetch_recent_drafts(settings: Settings, limit: int = 20) -> list[dict]:
 
 
 def fetch_draft_by_id(settings: Settings, draft_id: int) -> dict | None:
+    ensure_channel_columns(settings)
     with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -451,13 +499,30 @@ def fetch_draft_by_id(settings: Settings, draft_id: int) -> dict | None:
                     d.review_summary,
                     d.review_model,
                     d.reviewed_at,
+                    d.toutiao_score,
+                    d.toutiao_summary,
+                    d.toutiao_model,
+                    d.toutiao_reviewed_at,
+                    d.toutiao_topic_category,
+                    d.toutiao_title_candidates,
+                    d.toutiao_selected_title,
                     d.wechat_uploaded_at,
                     d.wechat_media_id,
                     d.toutiao_uploaded_at,
                     d.toutiao_article_id,
                     d.created_at,
                     tc.canonical_title,
+                    tc.item_count,
+                    (
+                        select count(*)
+                        from topic_cluster_items tci2
+                        join article_sources a2 on a2.board_snapshot_item_id = tci2.board_snapshot_item_id
+                        where tci2.cluster_id = d.cluster_id
+                          and a2.fetch_status = 'fetched'
+                          and length(coalesce(a2.content_text, '')) > 80
+                    ) as fetched_source_count,
                     to_char(d.reviewed_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as reviewed_at_text,
+                    to_char(d.toutiao_reviewed_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as toutiao_reviewed_at_text,
                     to_char(d.wechat_uploaded_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as wechat_uploaded_at_text,
                     to_char(d.toutiao_uploaded_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as toutiao_uploaded_at_text,
                     to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
@@ -480,6 +545,7 @@ def find_existing_draft_for_topic(
     draft_title: str = "",
     lookback_limit: int = 200,
 ) -> dict | None:
+    ensure_channel_columns(settings)
     clean_title = (canonical_title or "").strip()
     clean_draft_title = (draft_title or "").strip()
     with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
@@ -790,6 +856,7 @@ def delete_old_drafts(settings: Settings, retention_hours: int = 48) -> list[dic
 
 
 def fetch_unreviewed_drafts(settings: Settings, limit: int = 10) -> list[dict]:
+    ensure_channel_columns(settings)
     with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -838,6 +905,77 @@ def update_draft_review(
                 (score, review_summary, review_model, draft_id),
             )
         conn.commit()
+
+
+def update_draft_toutiao_review(
+    settings: Settings,
+    draft_id: int,
+    toutiao_score: float,
+    toutiao_summary: str,
+    toutiao_model: str,
+    *,
+    topic_category: str = "",
+    title_candidates: list[dict] | list[str] | None = None,
+    selected_title: str = "",
+) -> None:
+    ensure_channel_columns(settings)
+    score = max(0.0, min(10.0, round(float(toutiao_score), 1)))
+    candidates_json = json.dumps(title_candidates or [], ensure_ascii=False)
+    with get_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                update article_drafts
+                set
+                    toutiao_score = %s,
+                    toutiao_summary = %s,
+                    toutiao_model = %s,
+                    toutiao_reviewed_at = now(),
+                    toutiao_topic_category = %s,
+                    toutiao_title_candidates = %s::jsonb,
+                    toutiao_selected_title = %s
+                where id = %s
+                """,
+                (
+                    score,
+                    toutiao_summary,
+                    toutiao_model,
+                    topic_category,
+                    candidates_json,
+                    selected_title,
+                    draft_id,
+                ),
+            )
+        conn.commit()
+
+
+def fetch_untoutiao_reviewed_drafts(settings: Settings, limit: int = 10) -> list[dict]:
+    ensure_channel_columns(settings)
+    with psycopg.connect(settings.dsn, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select
+                    d.id,
+                    d.cluster_id,
+                    d.model_name,
+                    d.title,
+                    d.content_md,
+                    d.archive_path,
+                    d.review_score,
+                    d.review_summary,
+                    d.created_at,
+                    tc.canonical_title,
+                    to_char(d.created_at at time zone 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') as created_at_text
+                from article_drafts d
+                join topic_clusters tc on tc.id = d.cluster_id
+                where d.toutiao_score is null
+                order by d.created_at desc, d.id desc
+                limit %s
+                """,
+                (limit,),
+            )
+            return list(cur.fetchall())
 
 
 def mark_draft_wechat_uploaded(settings: Settings, draft_id: int, media_id: str | None = None) -> None:

@@ -13,9 +13,11 @@ from .services import (
     run_generate_drafts,
     run_manual_topic_draft,
     run_review_drafts,
+    run_review_toutiao_drafts,
     run_scrape,
 )
 from .scheduler import run_daily_publish_once
+from .toutiao_growth import record_toutiao_growth_note, save_toutiao_growth_snapshot
 from .toutiao_publisher import fetch_toutiao_article_stats, login_toutiao, publish_recent_drafts_to_toutiao
 from .wechat_publisher import publish_recent_drafts_to_wechat
 
@@ -34,6 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
     draft_parser.add_argument("--limit", type=int, default=1, help="最多生成多少篇")
     review_parser = subparsers.add_parser("review-drafts", help="让模型审核已生成初稿并写入文章评分")
     review_parser.add_argument("--limit", type=int, default=10, help="最多评分多少篇未评分初稿")
+    toutiao_review_parser = subparsers.add_parser("review-toutiao-drafts", help="让模型做头条专用评分并生成 3 个头条标题候选")
+    toutiao_review_parser.add_argument("--limit", type=int, default=10, help="最多评分多少篇未做头条评分的初稿")
     cleanup_parser = subparsers.add_parser("cleanup-hotspots", help="清理太久的热点缓存和未成稿聚类")
     cleanup_parser.add_argument("--retention-hours", type=int, default=None, help="覆盖配置里的热点保留小时数")
     manual_parser = subparsers.add_parser("manual-topic-draft", help="按指定话题联网搜索资料并生成公众号初稿")
@@ -47,10 +51,19 @@ def build_parser() -> argparse.ArgumentParser:
     toutiao_publish_parser.add_argument("--limit", type=int, default=10, help="最多发布多少篇")
     toutiao_stats_parser = subparsers.add_parser("toutiao-stats", help="读取今日头条已发布文章阅读/展现数据")
     toutiao_stats_parser.add_argument("--limit", type=int, default=50, help="最多读取多少篇")
+    toutiao_growth_parser = subparsers.add_parser("toutiao-growth-snapshot", help="保存今日头条发文效果快照并追加增长日志")
+    toutiao_growth_parser.add_argument("--limit", type=int, default=50, help="最多读取多少篇")
+    toutiao_growth_parser.add_argument("--note", default="", help="本次优化/执行备注")
+    toutiao_growth_parser.add_argument("--source", default="cli", help="来源标记，例如 cli / auto-publish / optimization")
+    toutiao_note_parser = subparsers.add_parser("toutiao-growth-note", help="只追加一条今日头条优化备注，不拉取后台数据")
+    toutiao_note_parser.add_argument("note", help="优化备注")
+    toutiao_note_parser.add_argument("--source", default="optimization", help="来源标记")
     auto_publish_parser = subparsers.add_parser("run-daily-auto-publish", help="执行每日自动抓取、成稿、评分与双端发布")
     auto_publish_parser.add_argument("--hotspot-limit", type=int, default=None, help="本轮最多挑多少个热点进入候选池；默认读取页面配置")
     auto_publish_parser.add_argument("--draft-limit", type=int, default=None, help="先生成多少篇初稿；默认读取页面配置")
     auto_publish_parser.add_argument("--publish-limit", type=int, default=None, help="最终择优发布多少篇；默认读取页面配置")
+    auto_publish_parser.add_argument("--schedule-time", default=None, help="本次执行归属的正式发文时间槽，例如 11:30 / 18:30 / 21:30")
+    auto_publish_parser.add_argument("--publish-lead-minutes", type=int, default=None, help="提前多少分钟启动抓取和生成；到正式发文时间再发布")
     auto_publish_parser.add_argument("--force", action="store_true", help="忽略今日已成功记录，强制执行一次")
     auto_publish_parser.add_argument("--trigger", default="cli", help="触发来源标记，例如 cli / windows-task / manual")
     pipeline_parser = subparsers.add_parser("run-pipeline", help="执行 scrape -> cluster -> enrich -> generate")
@@ -93,6 +106,10 @@ def main() -> int:
         print(json.dumps(run_review_drafts(settings, limit=args.limit), ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "review-toutiao-drafts":
+        print(json.dumps(run_review_toutiao_drafts(settings, limit=args.limit), ensure_ascii=False, indent=2))
+        return 0
+
     if args.command == "cleanup-hotspots":
         if args.retention_hours is not None:
             from .config import load_runtime_config, save_runtime_config
@@ -125,14 +142,41 @@ def main() -> int:
         print(json.dumps(fetch_toutiao_article_stats(settings, limit=args.limit), ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "toutiao-growth-snapshot":
+        print(
+            json.dumps(
+                save_toutiao_growth_snapshot(
+                    settings,
+                    limit=args.limit,
+                    note=args.note,
+                    source=args.source,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "toutiao-growth-note":
+        print(
+            json.dumps(
+                record_toutiao_growth_note(settings, note=args.note, source=args.source),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+
     if args.command == "run-daily-auto-publish":
         result = run_daily_publish_once(
             settings,
             trigger=args.trigger,
             force=args.force,
+            schedule_time=args.schedule_time,
             hotspot_limit=args.hotspot_limit,
             draft_limit=args.draft_limit,
             publish_limit=args.publish_limit,
+            publish_lead_minutes=args.publish_lead_minutes,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0 if result.get("status") != "error" else 1

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import threading
 from pathlib import Path
 from tempfile import gettempdir
@@ -26,7 +27,13 @@ from .llm import regenerate_draft_images_file
 from .multi_source import merged_multi_source_config, parse_lines, parse_rss_feed_lines, rss_feeds_to_text
 from .notifications import send_dingtalk_progress
 from .scheduler import ensure_scheduler_running, get_scheduler_state, trigger_daily_publish_now
-from .scheduler_history import latest_scheduler_brief_entry, latest_scheduler_history, read_scheduler_history
+from .scheduler_history import (
+    clear_scheduler_history,
+    delete_scheduler_history_entry,
+    latest_scheduler_brief_entry,
+    latest_scheduler_history,
+    read_scheduler_history,
+)
 from .runtime_log import append_runtime_log, clear_runtime_logs, latest_notice, read_runtime_logs
 from .services import (
     dashboard_payload,
@@ -37,9 +44,11 @@ from .services import (
     run_generate_drafts,
     run_manual_topic_draft,
     run_review_drafts,
+    run_review_toutiao_drafts,
     run_scrape,
 )
 from .toutiao_publisher import ToutiaoPublishError, login_toutiao, publish_draft_to_toutiao
+from .wechat_quality import evaluate_wechat_publish_quality
 from .wechat_publisher import ARTICLE_STYLE as PUBLISH_ARTICLE_STYLE
 from .wechat_publisher import _wechat_compatible_html, publish_draft_to_wechat
 
@@ -125,6 +134,44 @@ def _start_background_job(action_name: str, worker) -> bool:
 
     threading.Thread(target=runner, daemon=True).start()
     return True
+
+
+def _sync_windows_daily_tasks(schedule_times: list[str], lead_minutes: int = 30) -> tuple[bool, str]:
+    script = ROOT_DIR / "scripts" / "install_daily_auto_publish_task.ps1"
+    if not script.exists():
+        return False, f"计划任务安装脚本不存在：{script}"
+    if not schedule_times:
+        schedule_times = ["11:30", "18:30", "21:30"]
+    lead_minutes = max(0, min(int(lead_minutes or 0), 180))
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-At",
+        ",".join(schedule_times),
+        "-LeadMinutes",
+        str(lead_minutes),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+    except Exception as exc:
+        return False, f"同步 Windows 计划任务失败：{exc}"
+    output = "\n".join(part.strip() for part in [result.stdout, result.stderr] if part.strip()).strip()
+    if result.returncode != 0:
+        return False, output or f"同步 Windows 计划任务失败，exit={result.returncode}"
+    return True, output or "Windows 计划任务已同步"
 
 
 def _allowed_local_roots() -> list[Path]:
@@ -289,7 +336,40 @@ def index(request: Request, message: str | None = None, cluster_page: int = 1):
     payload = dashboard_payload(settings, cluster_page=max(1, cluster_page), cluster_page_size=12)
     logs = read_runtime_logs(limit=80)
     notice = latest_notice(logs)
-    recent_drafts = fetch_recent_drafts(settings, limit=8)
+    recent_drafts = fetch_recent_drafts(settings, limit=24)
+    runtime_daily = (runtime.get("automation") or {}).get("daily_publish") or {}
+    min_wechat_score = float(runtime_daily.get("min_publish_score", 8.2) or 8.2)
+    for draft in recent_drafts:
+        quality = evaluate_wechat_publish_quality(draft, min_score=min_wechat_score, require_image=True)
+        draft["wechat_quality_ok"] = bool(quality.get("ok"))
+        draft["wechat_quality_score"] = quality.get("score")
+        draft["wechat_quality_summary"] = quality.get("summary") or ""
+
+    def _draft_score(value) -> float:
+        try:
+            if value is None or value == "":
+                return -1.0
+            return float(value)
+        except Exception:
+            return -1.0
+
+    def _draft_created_key(row: dict) -> float:
+        created = row.get("created_at")
+        try:
+            return float(created.timestamp())
+        except Exception:
+            return float(row.get("id") or 0)
+
+    wechat_recent_drafts = sorted(
+        recent_drafts,
+        key=lambda row: (_draft_score(row.get("review_score")), _draft_created_key(row), int(row.get("id") or 0)),
+        reverse=True,
+    )[:8]
+    toutiao_recent_drafts = sorted(
+        recent_drafts,
+        key=lambda row: (_draft_score(row.get("toutiao_score")), _draft_created_key(row), int(row.get("id") or 0)),
+        reverse=True,
+    )[:8]
     scheduler_state = get_scheduler_state(settings)
     scheduler_history = read_scheduler_history(limit=8)
     latest_brief = latest_scheduler_brief_entry() or latest_scheduler_history()
@@ -313,10 +393,65 @@ def index(request: Request, message: str | None = None, cluster_page: int = 1):
             "runtime_logs": logs,
             "runtime_notice": notice,
             "recent_drafts": recent_drafts,
+            "wechat_recent_drafts": wechat_recent_drafts,
+            "toutiao_recent_drafts": toutiao_recent_drafts,
             "scheduler_state": scheduler_state,
             "scheduler_history": scheduler_history,
             "latest_scheduler_brief": latest_brief,
             **payload,
+        },
+    )
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request, message: str | None = None):
+    runtime = load_runtime_config(settings)
+    content_sources = merged_multi_source_config(runtime)
+    scheduler_state = get_scheduler_state(settings)
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        {
+            "message": message,
+            "runtime": runtime,
+            "masked_api_key": mask_secret(runtime.get("llm", {}).get("api_key", "")),
+            "masked_image_api_key": mask_secret(
+                runtime.get("images", {}).get("generation", {}).get("api_key", "")
+            ),
+            "masked_dingtalk_webhook": mask_secret(
+                runtime.get("notifications", {}).get("dingtalk", {}).get("webhook", "")
+            ),
+            "masked_toutiao_username": mask_secret(runtime.get("toutiao", {}).get("username", ""), keep=3),
+            "masked_toutiao_password": mask_secret(runtime.get("toutiao", {}).get("password", ""), keep=2),
+            "content_sources": content_sources,
+            "rss_feeds_text": rss_feeds_to_text(content_sources.get("rss_feeds", [])),
+            "scheduler_state": scheduler_state,
+        },
+    )
+
+
+@app.get("/scheduler-history", response_class=HTMLResponse)
+def scheduler_history_page(request: Request, message: str | None = None):
+    runtime = load_runtime_config(settings)
+    items = read_scheduler_history(limit=200)
+    success_count = sum(1 for item in items if str(item.get("status") or "").lower() == "success")
+    warning_count = sum(1 for item in items if str(item.get("status") or "").lower() == "warning")
+    error_count = sum(1 for item in items if str(item.get("status") or "").lower() == "error")
+    latest_item = items[0] if items else None
+    return templates.TemplateResponse(
+        request,
+        "scheduler_history.html",
+        {
+            "message": message,
+            "runtime": runtime,
+            "scheduler_history": items,
+            "scheduler_history_stats": {
+                "total": len(items),
+                "success": success_count,
+                "warning": warning_count,
+                "error": error_count,
+            },
+            "latest_scheduler_history": latest_item,
         },
     )
 
@@ -328,6 +463,7 @@ def update_config(
     llm_api_key: str = Form(""),
     llm_reasoning_effort: str = Form(""),
     llm_disable_env_proxy: str = Form(""),
+    llm_anti_ai_polish_enabled: str = Form(""),
     llm_draft_prompt: str = Form(""),
     image_generation_base_url: str = Form(""),
     image_generation_model: str = Form(""),
@@ -363,11 +499,16 @@ def update_config(
     dingtalk_secret: str = Form(""),
     dingtalk_timeout_seconds: int = Form(10),
     auto_daily_publish_enabled: str = Form(""),
-    auto_daily_publish_time: str = Form("07:00,17:00"),
+    auto_daily_publish_time: str = Form("11:30,18:30,21:30"),
+    auto_daily_publish_lead_minutes: int = Form(30),
     auto_daily_publish_hotspot_limit: int = Form(30),
     auto_daily_publish_draft_limit: int = Form(5),
-    auto_daily_publish_publish_limit: int = Form(3),
+    auto_daily_publish_wechat_publish_limit: int = Form(3),
+    auto_daily_publish_toutiao_publish_limit: int = Form(3),
+    auto_daily_publish_allow_cross_channel_duplicates: str = Form(""),
     auto_daily_publish_min_publish_score: float = Form(8.6),
+    auto_daily_publish_min_toutiao_score: float = Form(8.5),
+    auto_daily_publish_toutiao_topic_whitelist: str = Form("娱乐争议，家庭教育，职场消费，安全风险，普通人利益"),
     auto_daily_publish_retry_count: int = Form(2),
     auto_daily_publish_enable_wechat: str = Form(""),
     auto_daily_publish_enable_toutiao: str = Form(""),
@@ -391,6 +532,7 @@ def update_config(
     board_whitelist: str = Form(...),
     image_max_per_draft: int = Form(6),
     image_max_per_source: int = Form(4),
+    next_url: str = Form("/settings"),
 ):
     runtime = load_runtime_config(settings)
     runtime.setdefault("llm", {})
@@ -400,6 +542,12 @@ def update_config(
         runtime["llm"]["api_key"] = llm_api_key.strip()
     runtime["llm"]["reasoning_effort"] = llm_reasoning_effort.strip()
     runtime["llm"]["disable_env_proxy"] = llm_disable_env_proxy == "on"
+    runtime["llm"]["anti_ai_polish_enabled"] = llm_anti_ai_polish_enabled == "on"
+    runtime["llm"]["anti_ai_prompt_dir"] = "prompts/anti_ai/20260614_kejiang_zhuque"
+    runtime["llm"]["anti_ai_prompt_files"] = [
+        "workflow_5_tomato_formatting_upgraded.txt",
+        "workflow_6_humanization_upgraded.txt",
+    ]
     runtime["llm"]["draft_prompt"] = llm_draft_prompt.strip()
     runtime["draft_output_dir"] = draft_output_dir.strip()
     runtime["board_whitelist"] = [part.strip() for part in board_whitelist.split(",") if part.strip()]
@@ -499,19 +647,33 @@ def update_config(
             hour_text, minute_text = raw_time.split(":", 1)
             normalized_time = f"{max(0, min(int(hour_text), 23)):02d}:{max(0, min(int(minute_text), 59)):02d}"
         except Exception:
-            normalized_time = "07:00"
+            normalized_time = "11:30"
         if normalized_time not in schedule_times:
             schedule_times.append(normalized_time)
     if not schedule_times:
-        schedule_times = ["07:00", "17:00"]
+        schedule_times = ["11:30", "18:30", "21:30"]
+    wechat_publish_limit = max(0, min(int(auto_daily_publish_wechat_publish_limit), 10))
+    toutiao_publish_limit = max(0, min(int(auto_daily_publish_toutiao_publish_limit), 10))
+    publish_lead_minutes = max(0, min(int(auto_daily_publish_lead_minutes), 180))
+    toutiao_topic_whitelist = [
+        part.strip()
+        for part in re.split(r"[\r\n,，;；/、]+", auto_daily_publish_toutiao_topic_whitelist)
+        if part.strip()
+    ] or ["娱乐争议", "家庭教育", "职场消费", "安全风险", "普通人利益"]
     runtime["automation"]["daily_publish"] = {
         "enabled": auto_daily_publish_enabled == "on",
         "schedule_time": schedule_times[0],
         "schedule_times": schedule_times,
+        "publish_lead_minutes": publish_lead_minutes,
         "hotspot_limit": max(1, min(int(auto_daily_publish_hotspot_limit), 100)),
         "draft_limit": max(1, min(int(auto_daily_publish_draft_limit), 30)),
-        "publish_limit": max(1, min(int(auto_daily_publish_publish_limit), 10)),
+        "publish_limit": max(wechat_publish_limit, toutiao_publish_limit),
+        "wechat_publish_limit": wechat_publish_limit,
+        "toutiao_publish_limit": toutiao_publish_limit,
+        "allow_cross_channel_duplicates": auto_daily_publish_allow_cross_channel_duplicates == "on",
         "min_publish_score": max(0.0, min(float(auto_daily_publish_min_publish_score), 10.0)),
+        "min_toutiao_score": max(0.0, min(float(auto_daily_publish_min_toutiao_score), 10.0)),
+        "toutiao_topic_whitelist": toutiao_topic_whitelist,
         "retry_count": max(1, min(int(auto_daily_publish_retry_count), 5)),
         "enable_wechat": auto_daily_publish_enable_wechat == "on",
         "enable_toutiao": auto_daily_publish_enable_toutiao == "on",
@@ -521,6 +683,7 @@ def update_config(
         "preference_keywords": [part.strip() for part in re.split(r"[\r\n,，]+", auto_daily_publish_preference_keywords) if part.strip()],
     }
     save_runtime_config(settings, runtime)
+    task_sync_ok, task_sync_message = _sync_windows_daily_tasks(schedule_times, publish_lead_minutes)
     append_runtime_log(
         "success",
         (
@@ -529,6 +692,10 @@ def update_config(
             f"钉钉={'已启用' if runtime['notifications']['dingtalk']['enabled'] else '未启用'}；"
             f"自动任务={'已启用' if runtime['automation']['daily_publish']['enabled'] else '未启用'}"
         ),
+    )
+    append_runtime_log(
+        "success" if task_sync_ok else "warning",
+        f"Windows 计划任务同步：{task_sync_message}",
     )
     scheduler_state = get_scheduler_state(settings)
     _notify_progress(
@@ -545,24 +712,36 @@ def update_config(
             f"钉钉超时：{runtime['notifications']['dingtalk']['timeout_seconds']} 秒",
             f"自动任务：{'已开启' if runtime['automation']['daily_publish']['enabled'] else '未开启'}",
             f"自动执行时间：{' / '.join(runtime['automation']['daily_publish'].get('schedule_times') or [runtime['automation']['daily_publish']['schedule_time']])}",
+            f"提前准备：{runtime['automation']['daily_publish'].get('publish_lead_minutes', 30)} 分钟",
             f"自动热点候选：{runtime['automation']['daily_publish']['hotspot_limit']} 个",
             f"自动生成初稿：{runtime['automation']['daily_publish']['draft_limit']} 篇",
-            f"自动推送发布：{runtime['automation']['daily_publish']['publish_limit']} 篇",
-            f"自动发布分数线：{runtime['automation']['daily_publish'].get('min_publish_score', 8.6):.1f}",
+            f"自动发布计划：公众号 {runtime['automation']['daily_publish'].get('wechat_publish_limit', runtime['automation']['daily_publish']['publish_limit'])} 篇 / 头条 {runtime['automation']['daily_publish'].get('toutiao_publish_limit', runtime['automation']['daily_publish']['publish_limit'])} 篇",
+            f"公众号分数线：{runtime['automation']['daily_publish'].get('min_publish_score', 8.6):.1f}",
+            f"头条分数线：{runtime['automation']['daily_publish'].get('min_toutiao_score', 8.5):.1f}",
+            f"头条题材白名单：{' / '.join(runtime['automation']['daily_publish'].get('toutiao_topic_whitelist') or [])}",
             f"自动任务重试：{runtime['automation']['daily_publish']['retry_count']} 次",
             f"自动任务渠道：{'公众号' if runtime['automation']['daily_publish']['enable_wechat'] else ''}{' + ' if runtime['automation']['daily_publish']['enable_wechat'] and runtime['automation']['daily_publish']['enable_toutiao'] else ''}{'头条' if runtime['automation']['daily_publish']['enable_toutiao'] else ''}".strip() or '未启用',
+            f"跨渠道重复：{'允许' if runtime['automation']['daily_publish'].get('allow_cross_channel_duplicates') else '不允许'}",
             f"偏好关键词：{' / '.join(runtime['automation']['daily_publish']['preference_keywords']) if runtime['automation']['daily_publish']['preference_keywords'] else '未设置'}",
+            f"计划任务同步：{task_sync_message}",
         ],
-        level="success",
+        level="success" if task_sync_ok else "warning",
     )
     append_runtime_log(
         "info",
         (
             f"自动任务状态已刷新：time={scheduler_state['time']}｜"
-            f"hotspot_limit={scheduler_state['hotspot_limit']}｜draft_limit={scheduler_state['draft_limit']}｜publish_limit={scheduler_state['publish_limit']}"
+            f"lead={scheduler_state.get('publish_lead_minutes', 30)}｜"
+            f"hotspot_limit={scheduler_state['hotspot_limit']}｜draft_limit={scheduler_state['draft_limit']}｜"
+            f"wechat_publish_limit={scheduler_state.get('wechat_publish_limit', scheduler_state['publish_limit'])}｜"
+            f"toutiao_publish_limit={scheduler_state.get('toutiao_publish_limit', scheduler_state['publish_limit'])}"
         ),
     )
-    return RedirectResponse(url="/?message=配置已保存", status_code=303)
+    redirect_target = (next_url or "").strip() or "/settings"
+    if not redirect_target.startswith("/"):
+        redirect_target = "/settings"
+    separator = "&" if "?" in redirect_target else "?"
+    return RedirectResponse(url=f"{redirect_target}{separator}message={quote('配置已保存')}", status_code=303)
 
 
 @app.post("/actions/cleanup-hotspots")
@@ -607,48 +786,100 @@ def action_cleanup_hotspots(retention_days: int = Form(2), include_drafts: str =
 @app.post("/actions/auto-daily-publish-run-now")
 def action_auto_daily_publish_run_now():
     scheduler_state = get_scheduler_state(settings)
-    started = trigger_daily_publish_now(settings)
-    if not started:
-        message = "自动任务已有运行中，本次手动触发已跳过"
+    trigger_result = trigger_daily_publish_now(settings)
+    if not trigger_result.get("started"):
+        message = trigger_result.get("message") or "自动任务已有运行中，本次手动触发已跳过"
         append_runtime_log(
             "warning",
             (
                 f"{message}：schedule={scheduler_state['time']}｜"
-                f"hotspot_limit={scheduler_state['hotspot_limit']}｜draft_limit={scheduler_state['draft_limit']}｜publish_limit={scheduler_state['publish_limit']}"
+                f"hotspot_limit={scheduler_state['hotspot_limit']}｜draft_limit={scheduler_state['draft_limit']}｜"
+                f"wechat_publish_limit={scheduler_state.get('wechat_publish_limit', scheduler_state['publish_limit'])}｜"
+                f"toutiao_publish_limit={scheduler_state.get('toutiao_publish_limit', scheduler_state['publish_limit'])}"
             ),
             source="scheduler",
         )
         _notify_progress(
-            "自动任务未重复启动",
+            "自动任务未启动",
             [
-                "已有一轮自动任务正在执行，本次手动触发已跳过。",
+                message,
                 f"计划执行时间：{scheduler_state['time']}",
                 f"本次热点候选：{scheduler_state['hotspot_limit']} 个",
                 f"本次生成配置：{scheduler_state['draft_limit']} 篇",
-                f"本次推送配置：{scheduler_state['publish_limit']} 篇",
+                f"公众号计划：{scheduler_state.get('wechat_publish_limit', scheduler_state['publish_limit'])} 篇",
+                f"头条计划：{scheduler_state.get('toutiao_publish_limit', scheduler_state['publish_limit'])} 篇",
             ],
             level="warning",
         )
         return RedirectResponse(url=f"/?message={quote(message)}", status_code=303)
+    message = str(trigger_result.get("message") or "已手动触发自动任务")
     append_runtime_log(
         "info",
         (
-            f"已手动触发自动任务：schedule={scheduler_state['time']}｜"
-            f"hotspot_limit={scheduler_state['hotspot_limit']}｜draft_limit={scheduler_state['draft_limit']}｜publish_limit={scheduler_state['publish_limit']}"
+            f"{message}：schedule={scheduler_state['time']}｜"
+            f"hotspot_limit={scheduler_state['hotspot_limit']}｜draft_limit={scheduler_state['draft_limit']}｜"
+            f"wechat_publish_limit={scheduler_state.get('wechat_publish_limit', scheduler_state['publish_limit'])}｜"
+            f"toutiao_publish_limit={scheduler_state.get('toutiao_publish_limit', scheduler_state['publish_limit'])}"
         ),
         source="scheduler",
     )
     _notify_progress(
         "已手动触发自动任务",
         [
+            message,
             f"计划执行时间：{scheduler_state['time']}",
             f"本次热点候选：{scheduler_state['hotspot_limit']} 个",
             f"本次生成：{scheduler_state['draft_limit']} 篇",
-            f"本次推送：{scheduler_state['publish_limit']} 篇",
+            f"公众号计划：{scheduler_state.get('wechat_publish_limit', scheduler_state['publish_limit'])} 篇",
+            f"头条计划：{scheduler_state.get('toutiao_publish_limit', scheduler_state['publish_limit'])} 篇",
+            f"后台 PID：{trigger_result.get('pid', '-')}",
         ],
         level="info",
     )
-    return RedirectResponse(url="/?message=已手动触发自动任务", status_code=303)
+    return RedirectResponse(url=f"/?message={quote(message)}", status_code=303)
+
+
+@app.post("/scheduler-history/clear")
+def action_clear_scheduler_history(next_url: str = Form("/scheduler-history")):
+    result = clear_scheduler_history(delete_briefs=True)
+    append_runtime_log(
+        "success",
+        f"自动任务历史已清空：删除记录 {result['deleted']} 条｜删除简报 {result['brief_deleted']} 份",
+        source="scheduler",
+    )
+    message = f"自动任务历史已清空（{result['deleted']} 条）"
+    redirect_target = (next_url or "").strip() or "/scheduler-history"
+    if not redirect_target.startswith("/"):
+        redirect_target = "/scheduler-history"
+    separator = "&" if "?" in redirect_target else "?"
+    return RedirectResponse(
+        url=f"{redirect_target}{separator}message={quote(message)}",
+        status_code=303,
+    )
+
+
+@app.post("/scheduler-history/{history_id}/delete")
+def action_delete_scheduler_history(history_id: str, next_url: str = Form("/scheduler-history")):
+    result = delete_scheduler_history_entry(history_id, delete_brief=True)
+    if result["deleted"]:
+        append_runtime_log(
+            "success",
+            f"已删除自动任务记录：id={history_id}｜简报 {result['brief_deleted']} 份",
+            source="scheduler",
+        )
+        message = "自动任务记录已删除"
+    else:
+        append_runtime_log(
+            "warning",
+            f"删除自动任务记录失败：未找到 id={history_id}",
+            source="scheduler",
+        )
+        message = "未找到要删除的自动任务记录"
+    redirect_target = (next_url or "").strip() or "/scheduler-history"
+    if not redirect_target.startswith("/"):
+        redirect_target = "/scheduler-history"
+    separator = "&" if "?" in redirect_target else "?"
+    return RedirectResponse(url=f"{redirect_target}{separator}message={quote(message)}", status_code=303)
 
 
 @app.post("/actions/manual-topic")
@@ -771,6 +1002,27 @@ def action_review_drafts(limit: int = Form(10)):
 
     started = _start_background_job("模型审核评分", worker)
     message = "模型审核评分已开始，完成后公众号编辑器列表会按文章分优先展示。" if started else "已有任务执行中，请先查看前方日志进度。"
+    return RedirectResponse(
+        url=f"/?message={quote(message)}",
+        status_code=303,
+    )
+
+
+@app.post("/actions/review-toutiao-drafts")
+def action_review_toutiao_drafts(limit: int = Form(10)):
+    def progress(level: str, message: str):
+        append_runtime_log(level, message)
+
+    def worker():
+        append_runtime_log("info", f"开始执行：头条专用评分，limit={limit}")
+        result = run_review_toutiao_drafts(settings, limit=limit, progress_cb=progress)
+        append_runtime_log(
+            "warning" if result.get("failed_count") else "success",
+            f"头条专用评分完成：成功 {result['reviewed_count']} 篇，失败 {result.get('failed_count', 0)} 篇",
+        )
+
+    started = _start_background_job("头条专用评分", worker)
+    message = "头条专用评分已开始，完成后头条候选列表会按头条分优先展示。" if started else "已有任务执行中，请先查看前方日志进度。"
     return RedirectResponse(
         url=f"/?message={quote(message)}",
         status_code=303,
